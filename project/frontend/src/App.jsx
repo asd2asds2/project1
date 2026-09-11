@@ -1,28 +1,27 @@
-import { useEffect, useState } from 'react'
+import { BrowserRouter, Routes, Route } from "react-router-dom";
+import { AuthProvider } from "./context/AuthContext";
+import ProtectedRoute from "./components/ProtectedRoute";
+import LoginPage from "./pages/LoginPage";
+import HomePage from "./pages/HomePage";
 
 function App() {
-  const [health, setHealth] = useState(null)
-  const [dbStatus, setDbStatus] = useState(null)
-
-  useEffect(() => {
-    fetch('/api/health')
-      .then(res => res.json())
-      .then(data => setHealth(data))
-      .catch(() => setHealth({ status: 'error' }))
-
-    fetch('/api/db-check')
-      .then(res => res.json())
-      .then(data => setDbStatus(data))
-      .catch(() => setDbStatus({ status: 'error' }))
-  }, [])
-
   return (
-    <div style={{ fontFamily: 'sans-serif', padding: '2rem' }}>
-      <h1>Проект развёрнут</h1>
-      <p>Backend: {health ? JSON.stringify(health) : 'загрузка...'}</p>
-      <p>БД: {dbStatus ? JSON.stringify(dbStatus) : 'загрузка...'}</p>
-    </div>
-  )
+    <BrowserRouter>
+      <AuthProvider>
+        <Routes>
+          <Route path="/login" element={<LoginPage />} />
+          <Route
+            path="/"
+            element={
+              <ProtectedRoute>
+                <HomePage />
+              </ProtectedRoute>
+            }
+          />
+        </Routes>
+      </AuthProvider>
+    </BrowserRouter>
+  );
 }
 
 export default App
