@@ -1,0 +1,193 @@
+/* ==========================================================================
+   Ledger design system
+   Тема "гроссбух": бумага, чернила, тонкие линовки.
+   Никаких карточек с тенями и плавающих лейблов — только то, что
+   привычно любому, кто хоть раз держал в руках бухгалтерскую книгу.
+   ========================================================================== */
+
+:root {
+  --paper: #f3efe4;         /* фон страницы — состаренная бумага */
+  --paper-card: #fbf8f0;    /* лист поверх фона — чуть светлее */
+  --ink: #262920;           /* основной текст — почти чёрные чернила */
+  --ink-soft: #5c5c4e;      /* подписи, второстепенный текст */
+  --rule: #c9c0a4;          /* линии линовки */
+  --rule-strong: #8a8060;   /* акцентные линии (разделители разделов) */
+  --accent: #7a2e2e;        /* бордовые чернила — акцент, ошибки, кнопка */
+  --accent-hover: #5f2222;
+  --accent-soft: #efdcdc;   /* фон для алертов/бейджей на основе accent */
+  --focus-ring: #b8752c;    /* цвет обводки при фокусе — тёплый янтарь */
+
+  --font-serif: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --font-sans: "Inter", "Segoe UI", system-ui, -apple-system, sans-serif;
+
+  --radius: 2px; /* почти прямые углы — это книга, а не приложение */
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background-color: var(--paper);
+  /* едва заметная линовка на фоне всей страницы */
+  background-image: repeating-linear-gradient(
+    to bottom,
+    transparent,
+    transparent 27px,
+    var(--rule) 28px
+  );
+  color: var(--ink);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+.ledger-page {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+/* "Лист" — единственная поверхность в интерфейсе, без теней и скруглений */
+.ledger-sheet {
+  width: 100%;
+  max-width: 420px;
+  background: var(--paper-card);
+  border: 1px solid var(--rule-strong);
+  border-top: 4px double var(--rule-strong);
+  padding: 40px 36px;
+}
+
+.ledger-sheet--wide {
+  max-width: 760px;
+}
+
+.ledger-title {
+  font-family: var(--font-serif);
+  font-size: 26px;
+  font-weight: 600;
+  margin: 0 0 4px;
+  color: var(--ink);
+}
+
+.ledger-subtitle {
+  font-size: 14px;
+  color: var(--ink-soft);
+  margin: 0 0 32px;
+  line-height: 1.5;
+}
+
+/* Поля формы: подпись зафиксирована сверху, поле — линия, а не рамка */
+.ledger-field {
+  margin-bottom: 22px;
+}
+
+.ledger-field label {
+  display: block;
+  font-size: 13px;
+  color: var(--ink-soft);
+  margin-bottom: 6px;
+}
+
+.ledger-field input {
+  width: 100%;
+  border: none;
+  border-bottom: 1px solid var(--rule-strong);
+  background: transparent;
+  padding: 8px 2px;
+  font-size: 16px;
+  font-family: var(--font-sans);
+  color: var(--ink);
+}
+
+.ledger-field input:focus {
+  outline: none;
+  border-bottom: 2px solid var(--focus-ring);
+  padding-bottom: 7px; /* компенсация толщины линии, чтобы текст не прыгал */
+}
+
+.ledger-error {
+  border: 1px solid var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+  padding: 10px 12px;
+  margin-bottom: 20px;
+}
+
+.ledger-button {
+  width: 100%;
+  background: var(--accent);
+  color: var(--paper-card);
+  border: none;
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  font-size: 15px;
+  font-family: var(--font-sans);
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease;
+}
+
+.ledger-button:hover {
+  background: var(--accent-hover);
+}
+
+.ledger-button:disabled {
+  background: var(--ink-soft);
+  cursor: not-allowed;
+}
+
+.ledger-button:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+/* Верхняя панель на внутренних страницах */
+.ledger-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  padding: 20px 32px;
+  border-bottom: 2px solid var(--rule-strong);
+  background: var(--paper-card);
+}
+
+.ledger-header-brand {
+  font-family: var(--font-serif);
+  font-size: 19px;
+  color: var(--ink);
+}
+
+.ledger-header-user {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  font-size: 13px;
+  color: var(--ink-soft);
+}
+
+.ledger-link-button {
+  background: none;
+  border: none;
+  color: var(--accent);
+  font-size: 13px;
+  cursor: pointer;
+  padding: 0;
+  text-decoration: underline;
+}
+
+.ledger-empty-state {
+  text-align: center;
+  padding: 80px 24px;
+  color: var(--ink-soft);
+}
+
+.ledger-empty-state h2 {
+  font-family: var(--font-serif);
+  color: var(--ink);
+  font-size: 20px;
+  margin-bottom: 8px;
+}
