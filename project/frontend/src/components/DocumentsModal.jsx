@@ -21,7 +21,10 @@ function fmtDate(d) {
 }
 
 // entityType: "purchase" | "transfer" | "cancellation" | "unplanned"
-export default function DocumentsModal({ entityType, entityId, title, onClose }) {
+// onChanged — вызывается после успешной загрузки/удаления файла, чтобы
+// родительская таблица обновила счётчик 📎 у закупки, не дожидаясь
+// следующей полной перезагрузки страницы.
+export default function DocumentsModal({ entityType, entityId, title, onClose, onChanged }) {
   const { user } = useAuth();
   const canDelete = user?.role === "admin" || user?.role === "financier";
 
@@ -65,6 +68,7 @@ export default function DocumentsModal({ entityType, entityId, title, onClose })
       setDescription("");
       if (fileInputRef.current) fileInputRef.current.value = "";
       load();
+      onChanged?.();
     } catch (err) {
       setError(err.message);
     } finally {
@@ -87,6 +91,7 @@ export default function DocumentsModal({ entityType, entityId, title, onClose })
     try {
       await apiFetch(`/api/documents/${doc.id}`, { method: "DELETE" });
       load();
+      onChanged?.();
     } catch (err) {
       setError(err.message);
     }

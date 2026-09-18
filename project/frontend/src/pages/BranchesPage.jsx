@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { apiFetch } from "../api";
 import { useAuth } from "../context/AuthContext";
+import { BRANCH_PALETTE, colorForBranch } from "../theme/branchPalette";
 
-const EMPTY = { name: "", code: "", address: "" };
+const EMPTY = { name: "", code: "", address: "", color: "" };
 
 export default function BranchesPage() {
   const { user } = useAuth();
@@ -21,12 +22,16 @@ export default function BranchesPage() {
 
   function startEdit(b) {
     setEditing(b.id);
-    setForm({ name: b.name, code: b.code, address: b.address || "" });
+    setForm({ name: b.name, code: b.code, address: b.address || "", color: colorForBranch(b) });
   }
 
   function startNew() {
     setEditing("new");
-    setForm(EMPTY);
+    // Цвет по умолчанию для нового филиала — случайный из палитры (можно
+    // сразу же поменять на свой в этой же форме); если оставить как есть,
+    // при сохранении уйдёт именно этот цвет.
+    const random = BRANCH_PALETTE[Math.floor(Math.random() * BRANCH_PALETTE.length)];
+    setForm({ ...EMPTY, color: random });
   }
 
   async function save() {
@@ -65,6 +70,7 @@ export default function BranchesPage() {
         <table>
           <thead>
             <tr>
+              <th style={{ ...styles.th, width: 36 }}>Цвет</th>
               <th style={styles.th}>Название</th>
               <th style={styles.th}>Код</th>
               <th style={styles.th}>Адрес</th>
@@ -75,6 +81,9 @@ export default function BranchesPage() {
           <tbody>
             {branches.map((b) => (
               <tr key={b.id} style={!b.is_active ? { opacity: 0.5 } : {}}>
+                <td style={styles.td}>
+                  <span style={{ ...styles.colorDot, background: colorForBranch(b) }} title={colorForBranch(b)} />
+                </td>
                 <td style={styles.td}>{b.name}</td>
                 <td style={styles.td}>{b.code}</td>
                 <td style={styles.td}>{b.address || "—"}</td>
@@ -92,7 +101,7 @@ export default function BranchesPage() {
               </tr>
             ))}
             {branches.length === 0 && (
-              <tr><td colSpan={5} style={styles.emptyCell}>Филиалов пока нет</td></tr>
+              <tr><td colSpan={6} style={styles.emptyCell}>Филиалов пока нет</td></tr>
             )}
           </tbody>
         </table>
@@ -113,6 +122,25 @@ export default function BranchesPage() {
             <label style={styles.label}>
               Адрес
               <input value={form.address} onChange={(e) => setForm({ ...form, address: e.target.value })} style={styles.input} />
+            </label>
+            <label style={styles.label}>
+              Цвет (для меток в таблице закупок и на главной)
+              <div style={styles.colorRow}>
+                <input
+                  type="color"
+                  value={form.color || "#2f6fed"}
+                  onChange={(e) => setForm({ ...form, color: e.target.value })}
+                  style={styles.colorInput}
+                />
+                <span>{form.color}</span>
+                <button
+                  type="button"
+                  onClick={() => setForm({ ...form, color: BRANCH_PALETTE[Math.floor(Math.random() * BRANCH_PALETTE.length)] })}
+                  style={styles.linkButton}
+                >
+                  случайный
+                </button>
+              </div>
             </label>
             <div style={styles.modalActions}>
               <button type="button" onClick={() => setEditing(null)} style={styles.secondaryButton}>Отмена</button>
@@ -141,4 +169,7 @@ const styles = {
   label: { display: "flex", flexDirection: "column", gap: 5, fontSize: 12.5, color: "var(--text-secondary)", marginBottom: 12 },
   input: { padding: "8px 10px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)" },
   modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 10 },
+  colorDot: { display: "inline-block", width: 14, height: 14, borderRadius: "50%", border: "1px solid var(--border)" },
+  colorRow: { display: "flex", alignItems: "center", gap: 10 },
+  colorInput: { width: 40, height: 30, padding: 0, border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", background: "none", cursor: "pointer" },
 };

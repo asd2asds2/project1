@@ -5,6 +5,7 @@ import DocumentsModal from "./DocumentsModal";
 import NotesModal from "./NotesModal";
 import ImportExcelModal from "./ImportExcelModal";
 import ContextMenu from "./ContextMenu";
+import { colorForBranchId } from "../theme/branchPalette";
 
 const METHODS = ["ЕП", "ЭА", "ЗК", "Р", "Конкурс", "Другое"];
 const EMPTY_SHARE = { branch_id: "", amount: "" };
@@ -67,6 +68,10 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
 
   const [items, setItems] = useState([]);
   const [branches, setBranches] = useState([]);
+  // Ручной план (вводится руками, отдельно от фактических сумм закупок):
+  // ключи "0" (план на год) .. "4" (план на квартал). Приходит с бэка всегда
+  // полностью для года — см. GET /api/plan.
+  const [plan, setPlan] = useState({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [localSearch, setLocalSearch] = useState("");
@@ -117,12 +122,14 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
       if (pending) params.set("pending", "1");
       if (effectiveSearch) params.set("search", effectiveSearch);
 
-      const [purchasesRes, branchesRes] = await Promise.all([
+      const [purchasesRes, branchesRes, planRes] = await Promise.all([
         apiFetch(`/api/purchases?${params.toString()}`),
         apiFetch(`/api/branches`),
+        apiFetch(`/api/plan?year=${year}`),
       ]);
       setItems(purchasesRes.purchases);
       setBranches(branchesRes.branches);
+      setPlan(planRes.plan);
     } catch (err) {
       setError(err.message);
     } finally {
@@ -254,6 +261,25 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
     try {
       await apiFetch(`/api/purchases/${p.id}`, { method: "DELETE" });
       load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  // --- Ручной план (вводится руками) -----------------------------------------
+  // q = 0 — план на год целиком, 1..4 — план на конкретный квартал.
+  async function editPlan(q, label) {
+    const current = plan[q] || 0;
+    const input = prompt(`План ${label}, руб.:`, String(current));
+    if (input === null) return;
+    const amount = Number(String(input).replace(/[^\d.,-]/g, "").replace(",", "."));
+    if (!Number.isFinite(amount) || amount < 0) {
+      setError("Некорректная сумма плана");
+      return;
+    }
+    try {
+      await apiFetch(`/api/plan`, { method: "PUT", body: JSON.stringify({ year, quarter: q, amount }) });
+      setPlan((prev) => ({ ...prev, [q]: amount }));
     } catch (err) {
       setError(err.message);
     }
@@ -479,9 +505,24 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                       <div>
                         <div>{p.shares.length} филиала(ов)</div>
                         <div style={styles.sharesBreakdown}>
-                          {p.shares.map((s) => `${s.branch_name}: ${fmtMoney(s.amount)}`).join("; ")}
+                          {p.shares.map((s) => (
+                            <span key={s.branch_id} style={styles.branchTag}>
+                              <i style={{ ...styles.dot, background: colorForBranchId(branches, s.branch_id) }} />
+                              {s.branch_name}: {fmtMoney(s.amount)}
+                            </span>
+                          ))}
                         </div>
                       </div>
+                    ) : p.shares && p.shares.length === 1 ? (
+                      <span style={styles.branchTag}>
+                        <i style={{ ...styles.dot, background: colorForBranchId(branches, p.shares[0].branch_id) }} />
+                        {p.branch_name}
+                      </span>
+                    ) : p.branch_id ? (
+                      <span style={styles.branchTag}>
+                        <i style={{ ...styles.dot, background: colorForBranchId(branches, p.branch_id) }} />
+                        {p.branch_name}
+                      </span>
                     ) : (
                       p.branch_name || "—"
                     )}
@@ -600,6 +641,18 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
               <span>{fmtMoney(qt.total)} ₽</span>
               <span>·</span>
               <span>по центру: {fmtMoney(qt.center)} ₽</span>
+              <span>·</span>
+              <span>план: {fmtMoney(plan[qt.quarter])} ₽</span>
+              {canReview && (
+                <button
+                  type="button"
+                  onClick={() => editPlan(qt.quarter, `на ${qt.quarter} квартал`)}
+                  style={styles.planEditButton}
+                  title="Изменить план на этот квартал"
+                >
+                  ✏️
+                </button>
+              )}
             </div>
           ))}
           {quarterTotals.length > 1 && (
@@ -608,6 +661,18 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
               <span>{fmtMoney(quarterTotals.reduce((s, q) => s + q.total, 0))} ₽</span>
               <span>·</span>
               <span>по центру: {fmtMoney(quarterTotals.reduce((s, q) => s + q.center, 0))} ₽</span>
+              <span>·</span>
+              <span>план на год: {fmtMoney(plan[0])} ₽</span>
+              {canReview && (
+                <button
+                  type="button"
+                  onClick={() => editPlan(0, "на год")}
+                  style={styles.planEditButton}
+                  title="Изменить план на год"
+                >
+                  ✏️
+                </button>
+              )}
             </div>
           )}
         </div>
@@ -630,6 +695,7 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
           entityId={filesFor.id}
           title={filesFor.name}
           onClose={() => setFilesFor(null)}
+          onChanged={load}
         />
       )}
 
@@ -814,11 +880,13 @@ const styles = {
   td: { padding: "9px 12px", borderBottom: "1px solid var(--border)", fontSize: 13.5, color: "var(--text)" },
   dragHandleCell: { padding: "9px 4px", textAlign: "center" },
   dragHandle: { cursor: "grab", color: "var(--text-muted)", fontSize: 14, userSelect: "none", display: "inline-block", lineHeight: 1 },
-  sharesBreakdown: { fontSize: 11, color: "var(--text-secondary)", marginTop: 2 },
+  sharesBreakdown: { fontSize: 11, color: "var(--text-secondary)", marginTop: 2, display: "flex", flexDirection: "column", gap: 2 },
+  branchTag: { display: "inline-flex", alignItems: "center", gap: 5 },
   notesBadge: { marginLeft: 8, fontSize: 11, color: "var(--text-secondary)", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, padding: "1px 7px", whiteSpace: "nowrap" },
   quarterBadge: { fontSize: 12, fontWeight: 700, borderRadius: 10, padding: "2px 9px", whiteSpace: "nowrap" },
   quarterTotalsBar: { marginTop: 10, display: "flex", flexDirection: "column", gap: 4 },
-  quarterTotalRow: { fontSize: 13, color: "var(--text-secondary)", display: "flex", gap: 14, flexWrap: "wrap" },
+  quarterTotalRow: { fontSize: 13, color: "var(--text-secondary)", display: "flex", gap: 14, flexWrap: "wrap", alignItems: "center" },
+  planEditButton: { border: "none", background: "none", cursor: "pointer", fontSize: 12, padding: 0, lineHeight: 1 },
   emptyCell: { padding: 24, textAlign: "center", color: "var(--text-muted)" },
   actionsRow: { display: "flex", gap: 2, alignItems: "center" },
   iconButton: {
