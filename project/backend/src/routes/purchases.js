@@ -423,16 +423,26 @@ router.post('/:id/transfer', requireRole('admin', 'financier'), async (req, res)
     return res.status(400).json({ status: 'error', message: 'Укажите квартал и причину переноса' });
   }
 
+  const toQuarter = Number(to_quarter);
+
   try {
+    const current = await pool.query('SELECT quarter FROM purchases WHERE id = $1', [id]);
+    if (!current.rows[0]) {
+      return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
+    }
+    const fromQuarter = current.rows[0].quarter;
+    const noteText = `Перенесено из кв. ${fromQuarter} в кв. ${toQuarter}: ${reason}`;
+
+    // Текст примечания собираем в JS и передаём готовой строкой одним параметром —
+    // так у $1/$2/$3 однозначные типы и нет конфликта text/smallint внутри SQL.
     const result = await pool.query(
       `UPDATE purchases SET
-         transfer_note = COALESCE(transfer_note || '; ', '')
-           || 'Перенесено из кв. ' || quarter::text || ' в кв. ' || $1::text || ': ' || $2,
-         quarter = $1,
+         transfer_note = COALESCE(transfer_note || '; ', '') || $1,
+         quarter = $2,
          updated_at = now()
        WHERE id = $3
        RETURNING id`,
-      [Number(to_quarter), reason, id]
+      [noteText, toQuarter, id]
     );
     if (!result.rows[0]) {
       return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
