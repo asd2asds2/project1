@@ -6,7 +6,7 @@ export default function AnnualPlanPage() {
       year={2026}
       quarter={null}
       showQuarterColumn
-      title="Годовой план 2026 (Центр + филиалы)"
+      title=" 1Z Годовой план 2026 (Центр + филиалы)"
     />
   );
 }
