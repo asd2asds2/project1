@@ -65,7 +65,18 @@ router.get('/', async (req, res) => {
 router.post(
   '/',
   requireRole('admin', 'financier', 'branch_editor'),
-  upload.single('file'),
+  (req, res, next) => {
+    upload.single('file')(req, res, (err) => {
+      if (err) {
+        if (err.code === 'LIMIT_FILE_SIZE') {
+          return res.status(413).json({ status: 'error', message: 'Файл больше 20 МБ — уменьшите размер' });
+        }
+        console.error(err);
+        return res.status(400).json({ status: 'error', message: 'Не удалось загрузить файл' });
+      }
+      next();
+    });
+  },
   async (req, res) => {
     const { entity_type: entityType, entity_id: entityId, description } = req.body;
 
