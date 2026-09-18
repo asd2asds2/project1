@@ -20,6 +20,19 @@ function fmtDate(d) {
   });
 }
 
+// Иконка по расширению файла — чтобы служебки было видно с первого взгляда,
+// не открывая/не скачивая файл.
+function fileIcon(fileName) {
+  const ext = (fileName || "").split(".").pop()?.toLowerCase() || "";
+  if (["pdf"].includes(ext)) return "📕";
+  if (["doc", "docx", "rtf", "odt"].includes(ext)) return "📄";
+  if (["xls", "xlsx", "ods", "csv"].includes(ext)) return "📊";
+  if (["ppt", "pptx", "odp"].includes(ext)) return "📽️";
+  if (["jpg", "jpeg", "png", "gif", "webp", "bmp", "tif", "tiff"].includes(ext)) return "🖼️";
+  if (["zip", "rar", "7z"].includes(ext)) return "🗜️";
+  return "📎";
+}
+
 // entityType: "purchase" | "transfer" | "cancellation" | "unplanned"
 // onChanged — вызывается после успешной загрузки/удаления файла, чтобы
 // родительская таблица обновила счётчик 📎 у закупки, не дожидаясь
@@ -100,6 +113,7 @@ export default function DocumentsModal({ entityType, entityId, title, onClose, o
   return (
     <div style={styles.overlay} onClick={onClose}>
       <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+        <div style={styles.stickyHead}>
         <h3 style={{ marginTop: 0 }}>Файлы служебок{title ? ` — ${title}` : ""}</h3>
 
         {error && <div style={styles.errorBox}>{error}</div>}
@@ -120,29 +134,44 @@ export default function DocumentsModal({ entityType, entityId, title, onClose, o
           />
           {uploading && <div style={styles.hint}>Загрузка…</div>}
         </div>
+        </div>
 
         <div style={styles.list}>
           {loading && <div style={styles.hint}>Загрузка списка…</div>}
           {!loading && docs.length === 0 && <div style={styles.hint}>Файлов пока нет</div>}
           {!loading &&
-            docs.map((d) => (
-              <div key={d.id} style={styles.docRow}>
-                <div style={styles.docInfo}>
-                  <button type="button" onClick={() => handleDownload(d)} style={styles.docName}>
-                    {d.file_name}
-                  </button>
-                  <div style={styles.docMeta}>
-                    {fmtSize(d.file_size)} · {d.uploaded_by_name || "—"} · {fmtDate(d.uploaded_at)}
-                    {d.description ? ` · ${d.description}` : ""}
+            docs.map((d) => {
+              const tooltip = [d.file_name, d.description].filter(Boolean).join(" — ");
+              return (
+                <div key={d.id} style={styles.docRow} title={tooltip}>
+                  <span style={styles.docIcon}>{fileIcon(d.file_name)}</span>
+                  <div style={styles.docInfo}>
+                    <button type="button" onClick={() => handleDownload(d)} style={styles.docName} title={tooltip}>
+                      {d.file_name}
+                    </button>
+                    <div style={styles.docMeta}>
+                      {fmtSize(d.file_size)} · {d.uploaded_by_name || "—"} · {fmtDate(d.uploaded_at)}
+                      {d.description ? ` · ${d.description}` : ""}
+                    </div>
+                  </div>
+                  <div style={styles.docActions}>
+                    <button
+                      type="button"
+                      onClick={() => handleDownload(d)}
+                      style={styles.downloadButton}
+                      title="Скачать"
+                    >
+                      ⬇
+                    </button>
+                    {canDelete && (
+                      <button type="button" onClick={() => handleDelete(d)} style={styles.deleteButton} title="Удалить">
+                        ✕
+                      </button>
+                    )}
                   </div>
                 </div>
-                {canDelete && (
-                  <button type="button" onClick={() => handleDelete(d)} style={styles.deleteButton} title="Удалить">
-                    ✕
-                  </button>
-                )}
-              </div>
-            ))}
+              );
+            })}
         </div>
 
         <div style={styles.actions}>
@@ -175,6 +204,14 @@ const styles = {
     overflow: "auto",
     boxShadow: "var(--shadow-md)",
     color: "var(--text)",
+  },
+  stickyHead: {
+    position: "sticky",
+    top: -24,
+    background: "var(--surface)",
+    zIndex: 1,
+    paddingTop: 24,
+    marginTop: -24,
   },
   errorBox: {
     background: "var(--danger-soft)",
@@ -210,7 +247,8 @@ const styles = {
     background: "var(--surface-2)",
     borderRadius: "var(--radius-sm)",
   },
-  docInfo: { display: "flex", flexDirection: "column", gap: 3, minWidth: 0 },
+  docIcon: { fontSize: 18, lineHeight: "20px", flexShrink: 0 },
+  docInfo: { display: "flex", flexDirection: "column", gap: 3, minWidth: 0, flex: 1 },
   docName: {
     border: "none",
     background: "none",
@@ -220,9 +258,29 @@ const styles = {
     fontWeight: 600,
     padding: 0,
     textAlign: "left",
-    wordBreak: "break-word",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+    maxWidth: "100%",
+    display: "block",
   },
-  docMeta: { fontSize: 11.5, color: "var(--text-secondary)" },
+  docMeta: {
+    fontSize: 11.5,
+    color: "var(--text-secondary)",
+    whiteSpace: "nowrap",
+    overflow: "hidden",
+    textOverflow: "ellipsis",
+  },
+  docActions: { display: "flex", alignItems: "center", gap: 2, flexShrink: 0 },
+  downloadButton: {
+    border: "none",
+    background: "none",
+    color: "var(--accent)",
+    cursor: "pointer",
+    fontSize: 14,
+    padding: "2px 6px",
+    flexShrink: 0,
+  },
   deleteButton: {
     border: "none",
     background: "none",
