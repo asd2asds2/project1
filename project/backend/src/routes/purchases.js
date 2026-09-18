@@ -1,793 +1,859 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
-import { apiFetch } from "../api";
-import { useAuth } from "../context/AuthContext";
-import DocumentsModal from "./DocumentsModal";
-import NotesModal from "./NotesModal";
-import ImportExcelModal from "./ImportExcelModal";
-import ContextMenu from "./ContextMenu";
+const express = require('express');
+const fs = require('fs');
+const path = require('path');
+const multer = require('multer');
+const XLSX = require('xlsx');
+const pool = require('../db');
+const { requireAuth, requireRole } = require('../middleware/auth');
 
-const METHODS = ["ЕП", "ЭА", "ЗК", "Р", "Конкурс", "Другое"];
-const EMPTY_SHARE = { branch_id: "", amount: "" };
-const EMPTY_FORM = {
-  quarter: 1, name: "", product_group: "", method: "ЕП",
-  justification: "", tz_date: "", notice_date: "", deadline: "", okpd2: "", comment: "",
-  shares: [{ ...EMPTY_SHARE }],
-};
+const router = express.Router();
 
-const QUARTER_COLORS = {
-  1: "#2f6fed",
-  2: "#1a8a4e",
-  3: "#b6780f",
-  4: "#8a4fd1",
-};
+// Тот же volume, что и у documents.js (см. docker-compose.yml, uploads_data:/app/uploads) —
+// нужен здесь, чтобы при полном удалении закупки подчистить и её файлы служебок с диска.
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', '..', 'uploads');
 
-function fmtMoney(n) {
-  return Number(n || 0).toLocaleString("ru-RU", { minimumFractionDigits: 0 });
-}
+// Файл для импорта нужен только на время разбора — в памяти, на диск не пишем.
+const memoryUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+});
 
-function isCenterName(name) {
-  return /центр/i.test(String(name || ""));
-}
+router.use(requireAuth);
 
-function centerAmountOf(p) {
-  if (p.shares && p.shares.length > 0) {
-    return p.shares.reduce((sum, s) => sum + (isCenterName(s.branch_name) ? Number(s.amount || 0) : 0), 0);
-  }
-  return isCenterName(p.branch_name) ? Number(p.amount || 0) : 0;
-}
+// ---------------------------------------------------------------------------
+// Сводка для главной страницы
+// ---------------------------------------------------------------------------
+router.get('/summary', async (req, res) => {
+  const year = Number(req.query.year) || new Date().getFullYear();
 
-function rowStyle(p) {
-  if (p.status === "cancelled") {
-    return { background: "var(--surface)", color: "var(--cancelled-text)", textDecoration: "line-through" };
-  }
-  if (p.status === "unplanned") {
-    return { background: "var(--unplanned-bg)", borderLeft: "3px solid var(--unplanned-border)" };
-  }
-  if (p.source === "branch" && !p.reviewed_at) {
-    return { background: "var(--highlight-new-bg)", borderLeft: "3px solid var(--highlight-new-border)" };
-  }
-  return {};
-}
+  try {
+    const byQuarter = await pool.query(
+      `SELECT quarter, COALESCE(SUM(amount), 0) AS total, COUNT(*) AS items
+       FROM purchases
+       WHERE year = $1 AND status <> 'cancelled'
+       GROUP BY quarter
+       ORDER BY quarter`,
+      [year]
+    );
 
-export default function PurchasesTable({ year = 2026, quarter = null, search = "", pending = false, showQuarterColumn = false, title }) {
-  const { user } = useAuth();
-  const canEdit = user?.role === "admin" || user?.role === "financier" || user?.role === "branch_editor";
-  const canReview = user?.role === "admin" || user?.role === "financier";
-  const canImport = user?.role === "admin" || user?.role === "financier";
+    // Суммы по филиалам — учитываем и старые закупки с одним branch_id,
+    // и новые с разбивкой в purchase_branch_shares (закупка может попасть
+    // в обе категории быть не может — branch_id и shares взаимоисключающие).
+    const byBranch = await pool.query(
+      `WITH branch_amounts AS (
+         SELECT p.branch_id, p.amount
+         FROM purchases p
+         WHERE p.year = $1 AND p.status <> 'cancelled' AND p.branch_id IS NOT NULL
+         UNION ALL
+         SELECT s.branch_id, s.amount
+         FROM purchase_branch_shares s
+         JOIN purchases p ON p.id = s.purchase_id
+         WHERE p.year = $1 AND p.status <> 'cancelled'
+       )
+       SELECT b.id AS branch_id, b.name AS branch_name, COALESCE(SUM(ba.amount), 0) AS total
+       FROM branches b
+       LEFT JOIN branch_amounts ba ON ba.branch_id = b.id
+       WHERE b.is_active = true
+       GROUP BY b.id, b.name
+       ORDER BY b.name`,
+      [year]
+    );
 
-  const [items, setItems] = useState([]);
-  const [branches, setBranches] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState("");
-  const [localSearch, setLocalSearch] = useState("");
-  const [editing, setEditing] = useState(null);
-  const [form, setForm] = useState(EMPTY_FORM);
-  const [filesFor, setFilesFor] = useState(null);
-  const [notesFor, setNotesFor] = useState(null);
-  const [importing, setImporting] = useState(false);
-  const [menu, setMenu] = useState(null);
-  const [dragId, setDragId] = useState(null);
-  const [overId, setOverId] = useState(null);
+    const pendingReview = await pool.query(
+      `SELECT COUNT(*) AS cnt FROM purchases
+       WHERE year = $1 AND source = 'branch' AND reviewed_at IS NULL AND status <> 'cancelled'`,
+      [year]
+    );
 
-  const effectiveSearch = search || localSearch;
-  const canReorder = canEdit && !!quarter && !effectiveSearch && !pending;
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    setError("");
-    try {
-      const params = new URLSearchParams({ year: String(year) });
-      if (quarter) params.set("quarter", String(quarter));
-      if (pending) params.set("pending", "1");
-      if (effectiveSearch) params.set("search", effectiveSearch);
-
-      const [purchasesRes, branchesRes] = await Promise.all([
-        apiFetch(`/api/purchases?${params.toString()}`),
-        apiFetch(`/api/branches`),
-      ]);
-      setItems(purchasesRes.purchases);
-      setBranches(branchesRes.branches);
-    } catch (err) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  }, [year, quarter, search, pending, localSearch]);
-
-  useEffect(() => { load(); }, [load]);
-
-  const stats = useMemo(() => {
-    const active = items.filter((i) => i.status !== "cancelled");
-    return {
-      total: active.reduce((sum, i) => sum + Number(i.amount || 0), 0),
-      count: active.length,
-      cancelled: items.filter((i) => i.status === "cancelled").length,
-      unplanned: items.filter((i) => i.status === "unplanned").length,
-      pendingReview: items.filter((i) => i.source === "branch" && !i.reviewed_at).length,
-    };
-  }, [items]);
-
-  const quarterTotals = useMemo(() => {
-    const active = items.filter((i) => i.status !== "cancelled");
-    const quarters = [...new Set(active.map((i) => i.quarter))].sort((a, b) => a - b);
-    return quarters.map((q) => {
-      const qItems = active.filter((i) => i.quarter === q);
-      return {
-        quarter: q,
-        total: qItems.reduce((sum, i) => sum + Number(i.amount || 0), 0),
-        center: qItems.reduce((sum, i) => sum + centerAmountOf(i), 0),
-      };
+    res.json({
+      status: 'ok',
+      byQuarter: byQuarter.rows,
+      byBranch: byBranch.rows,
+      pendingReview: Number(pendingReview.rows[0].cnt),
     });
-  }, [items]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
 
-  function startEdit(p) {
-    setEditing(p.id);
-    const shares =
-      p.shares && p.shares.length > 0
-        ? p.shares.map((s) => ({ branch_id: s.branch_id, amount: s.amount }))
-        : [{ branch_id: p.branch_id || "", amount: p.amount || "" }];
-    setForm({
-      quarter: p.quarter, name: p.name, product_group: p.product_group || "",
-      method: p.method || "ЕП", justification: p.justification || "",
-      tz_date: p.tz_date ? p.tz_date.slice(0, 10) : "", notice_date: p.notice_date ? p.notice_date.slice(0, 10) : "",
-      deadline: p.deadline || "", okpd2: p.okpd2 || "", comment: p.comment || "",
-      shares,
+// ---------------------------------------------------------------------------
+// Список закупок с фильтрами: year (обязателен), quarter, pending=1, search
+// ---------------------------------------------------------------------------
+router.get('/', async (req, res) => {
+  const year = Number(req.query.year) || new Date().getFullYear();
+  const { quarter, pending, search } = req.query;
+
+  const conditions = ['p.year = $1'];
+  const values = [year];
+  let idx = 2;
+
+  if (quarter) {
+    conditions.push(`p.quarter = $${idx++}`);
+    values.push(Number(quarter));
+  }
+  if (pending === '1') {
+    conditions.push(`p.source = 'branch' AND p.reviewed_at IS NULL`);
+  }
+  if (search) {
+    conditions.push(
+      `(p.name ILIKE $${idx} OR p.okpd2 ILIKE $${idx} OR b.name ILIKE $${idx}
+        OR EXISTS (
+          SELECT 1 FROM purchase_branch_shares s2
+          JOIN branches bb2 ON bb2.id = s2.branch_id
+          WHERE s2.purchase_id = p.id AND bb2.name ILIKE $${idx}
+        ))`
+    );
+    values.push(`%${search}%`);
+    idx++;
+  }
+
+  try {
+    const result = await pool.query(
+      `SELECT p.*,
+              b.name AS branch_name_legacy,
+              COALESCE(
+                (SELECT json_agg(json_build_object('branch_id', bb.id, 'branch_name', bb.name, 'amount', s.amount) ORDER BY bb.name)
+                 FROM purchase_branch_shares s
+                 JOIN branches bb ON bb.id = s.branch_id
+                 WHERE s.purchase_id = p.id),
+                '[]'
+              ) AS shares,
+              (SELECT COUNT(*) FROM purchase_notes n WHERE n.purchase_id = p.id) AS notes_count,
+              (SELECT COUNT(*) FROM documents d WHERE d.entity_type = 'purchase' AND d.entity_id = p.id) AS documents_count,
+              ROW_NUMBER() OVER (
+                PARTITION BY p.quarter
+                ORDER BY COALESCE(p.sort_order, 2147483647),
+                         CASE WHEN p.method = 'Р' THEN 1 ELSE 0 END,
+                         p.product_group,
+                         p.created_at
+              ) AS item_no
+       FROM purchases p
+       LEFT JOIN branches b ON b.id = p.branch_id
+       WHERE ${conditions.join(' AND ')}
+       ORDER BY p.quarter,
+                COALESCE(p.sort_order, 2147483647),
+                CASE WHEN p.method = 'Р' THEN 1 ELSE 0 END,
+                p.product_group,
+                p.created_at`,
+      values
+    );
+
+    const purchases = result.rows.map((p) => {
+      const { branch_name_legacy, ...rest } = p;
+      const branchName =
+        rest.shares && rest.shares.length > 0
+          ? rest.shares.map((s) => s.branch_name).join(', ')
+          : branch_name_legacy || '—';
+      return { ...rest, branch_name: branchName };
     });
+
+    res.json({ status: 'ok', purchases });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Сохранение ручного порядка закупок внутри квартала (перетаскивание в UI).
+// Тело: { year, quarter, order: [id1, id2, ...] } — порядок в массиве = новый
+// порядок строк. Затрагивает только закупки, реально принадлежащие этому
+// year/quarter (защита от подмены чужих id).
+// ---------------------------------------------------------------------------
+router.patch('/reorder', requireRole('admin', 'financier', 'branch_editor'), async (req, res) => {
+  const { year, quarter, order } = req.body;
+
+  if (!year || !quarter || !Array.isArray(order) || order.length === 0) {
+    return res.status(400).json({ status: 'error', message: 'Некорректные данные для сохранения порядка' });
   }
 
-  function startNew() {
-    setEditing("new");
-    setForm({ ...EMPTY_FORM, quarter: quarter || 1, shares: [{ branch_id: branches[0]?.id || "", amount: "" }] });
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (let i = 0; i < order.length; i++) {
+      await client.query(
+        `UPDATE purchases SET sort_order = $1 WHERE id = $2 AND year = $3 AND quarter = $4`,
+        [i + 1, Number(order[i]), Number(year), Number(quarter)]
+      );
+    }
+    await client.query('COMMIT');
+    res.json({ status: 'ok' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  } finally {
+    client.release();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Заметки по закупке — свободный текстовый лог, отдельный от служебного
+// "Примечания" в самой карточке (то поле — часть плана, а это — обсуждение/
+// история по ходу работы, доступно всем, кто видит закупку).
+// ---------------------------------------------------------------------------
+router.get('/:id/notes', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT n.id, n.purchase_id, n.text, n.created_at, n.author_id, u.full_name AS author_name
+       FROM purchase_notes n
+       LEFT JOIN users u ON u.id = n.author_id
+       WHERE n.purchase_id = $1
+       ORDER BY n.created_at DESC`,
+      [req.params.id]
+    );
+    res.json({ status: 'ok', notes: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+router.post('/:id/notes', requireRole('admin', 'financier', 'branch_editor'), async (req, res) => {
+  const { text } = req.body;
+
+  if (!text || !String(text).trim()) {
+    return res.status(400).json({ status: 'error', message: 'Введите текст заметки' });
   }
 
-  async function save() {
-    const cleanShares = form.shares
-      .map((s) => ({ branch_id: Number(s.branch_id), amount: Number(s.amount) }))
-      .filter((s) => s.branch_id && s.amount > 0);
+  try {
+    const result = await pool.query(
+      `INSERT INTO purchase_notes (purchase_id, author_id, text)
+       VALUES ($1, $2, $3)
+       RETURNING id, purchase_id, text, created_at, author_id`,
+      [req.params.id, req.user.userId, String(text).trim()]
+    );
+    const userRow = await pool.query('SELECT full_name FROM users WHERE id = $1', [req.user.userId]);
+    res.json({
+      status: 'ok',
+      note: { ...result.rows[0], author_name: userRow.rows[0]?.full_name || null },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
 
-    if (cleanShares.length === 0) {
-      setError("Укажите хотя бы один филиал и сумму больше нуля");
-      return;
+router.delete('/:id/notes/:noteId', async (req, res) => {
+  try {
+    const check = await pool.query('SELECT author_id FROM purchase_notes WHERE id = $1', [req.params.noteId]);
+    if (!check.rows[0]) {
+      return res.status(404).json({ status: 'error', message: 'Заметка не найдена' });
     }
 
-    const payload = { ...form, shares: cleanShares };
-    delete payload.branch_id;
-
-    try {
-      if (editing === "new") {
-        await apiFetch(`/api/purchases`, { method: "POST", body: JSON.stringify({ ...payload, year }) });
-      } else {
-        await apiFetch(`/api/purchases/${editing}`, { method: "PUT", body: JSON.stringify(payload) });
-      }
-      setEditing(null);
-      load();
-    } catch (err) {
-      setError(err.message);
+    const isOwner = check.rows[0].author_id === req.user.userId;
+    const isPrivileged = req.user.role === 'admin' || req.user.role === 'financier';
+    if (!isOwner && !isPrivileged) {
+      return res.status(403).json({ status: 'error', message: 'Можно удалять только свои заметки' });
     }
+
+    await pool.query('DELETE FROM purchase_notes WHERE id = $1', [req.params.noteId]);
+    res.json({ status: 'ok' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Создание закупки — всегда через "доли" по филиалам (shares), даже если
+// филиал один. admin/financier (центр) или branch_editor (филиал, требует
+// последующей проверки центром).
+// Тело: { year, quarter, name, product_group, method, justification,
+//         tz_date, notice_date, deadline, okpd2, comment,
+//         shares: [{ branch_id, amount }, ...] }
+// ---------------------------------------------------------------------------
+router.post('/', requireRole('admin', 'financier', 'branch_editor'), async (req, res) => {
+  const {
+    year, quarter, name, product_group, method,
+    justification, tz_date, notice_date, deadline, okpd2, comment, shares,
+  } = req.body;
+
+  if (!year || !quarter || !name) {
+    return res.status(400).json({ status: 'error', message: 'Заполните обязательные поля' });
   }
 
-  async function review(id) {
-    try {
-      await apiFetch(`/api/purchases/${id}/review`, { method: "POST" });
-      load();
-    } catch (err) {
-      setError(err.message);
-    }
+  const cleanShares = Array.isArray(shares)
+    ? shares
+        .map((s) => ({ branch_id: Number(s.branch_id), amount: Number(s.amount) }))
+        .filter((s) => s.branch_id && s.amount > 0)
+    : [];
+
+  if (cleanShares.length === 0) {
+    return res.status(400).json({ status: 'error', message: 'Укажите хотя бы один филиал и сумму' });
   }
 
-  async function transfer(id) {
-    const to = prompt("Перенести в какой квартал? (1-4)");
-    if (!to) return;
-    const reason = prompt("Причина переноса:");
-    if (!reason) return;
-    try {
-      await apiFetch(`/api/purchases/${id}/transfer`, { method: "POST", body: JSON.stringify({ to_quarter: Number(to), reason }) });
-      load();
-    } catch (err) {
-      setError(err.message);
+  const amountTotal = cleanShares.reduce((sum, s) => sum + s.amount, 0);
+  const source = req.user.role === 'branch_editor' ? 'branch' : 'center';
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const purchaseResult = await client.query(
+      `INSERT INTO purchases
+        (year, quarter, branch_id, name, product_group, method, justification,
+         tz_date, notice_date, amount, deadline, okpd2, comment, source, created_by)
+       VALUES ($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+       RETURNING id`,
+      [
+        year, quarter, name, product_group || null, method || null,
+        justification || null, tz_date || null, notice_date || null, amountTotal,
+        deadline || null, okpd2 || null, comment || null, source, req.user.userId,
+      ]
+    );
+    const purchaseId = purchaseResult.rows[0].id;
+
+    for (const s of cleanShares) {
+      await client.query(
+        `INSERT INTO purchase_branch_shares (purchase_id, branch_id, amount) VALUES ($1,$2,$3)`,
+        [purchaseId, s.branch_id, s.amount]
+      );
     }
+
+    await client.query('COMMIT');
+
+    const full = await fetchPurchaseWithShares(purchaseId);
+    res.json({ status: 'ok', purchase: full });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  } finally {
+    client.release();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Редактирование закупки — полностью заменяет набор долей по филиалам.
+// Если правит филиал (branch_editor) — сбрасываем reviewed_at.
+// ---------------------------------------------------------------------------
+router.put('/:id', requireRole('admin', 'financier', 'branch_editor'), async (req, res) => {
+  const { id } = req.params;
+  const {
+    quarter, name, product_group, method, justification,
+    tz_date, notice_date, deadline, okpd2, comment, shares,
+  } = req.body;
+
+  const cleanShares = Array.isArray(shares)
+    ? shares
+        .map((s) => ({ branch_id: Number(s.branch_id), amount: Number(s.amount) }))
+        .filter((s) => s.branch_id && s.amount > 0)
+    : [];
+
+  if (cleanShares.length === 0) {
+    return res.status(400).json({ status: 'error', message: 'Укажите хотя бы один филиал и сумму' });
   }
 
-  async function cancelItem(id) {
-    const reason = prompt("Причина отмены:");
-    if (!reason) return;
-    try {
-      await apiFetch(`/api/purchases/${id}/cancel`, { method: "POST", body: JSON.stringify({ reason }) });
-      load();
-    } catch (err) {
-      setError(err.message);
+  const amountTotal = cleanShares.reduce((sum, s) => sum + s.amount, 0);
+  const resetReview = req.user.role === 'branch_editor';
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const updateResult = await client.query(
+      `UPDATE purchases SET
+         quarter = COALESCE($1, quarter),
+         branch_id = NULL,
+         name = COALESCE($2, name),
+         product_group = $3,
+         method = $4,
+         justification = $5,
+         tz_date = $6,
+         notice_date = $7,
+         amount = $8,
+         deadline = $9,
+         okpd2 = $10,
+         comment = $11,
+         reviewed_at = CASE WHEN $12 THEN NULL ELSE reviewed_at END,
+         updated_at = now()
+       WHERE id = $13
+       RETURNING id`,
+      [
+        quarter, name, product_group || null, method || null, justification || null,
+        tz_date || null, notice_date || null, amountTotal, deadline || null,
+        okpd2 || null, comment || null, resetReview, id,
+      ]
+    );
+
+    if (!updateResult.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
     }
+
+    await client.query('DELETE FROM purchase_branch_shares WHERE purchase_id = $1', [id]);
+    for (const s of cleanShares) {
+      await client.query(
+        `INSERT INTO purchase_branch_shares (purchase_id, branch_id, amount) VALUES ($1,$2,$3)`,
+        [id, s.branch_id, s.amount]
+      );
+    }
+
+    await client.query('COMMIT');
+
+    const full = await fetchPurchaseWithShares(id);
+    res.json({ status: 'ok', purchase: full });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  } finally {
+    client.release();
+  }
+});
+
+// Отметить как просмотренное центром (снимает жёлтую подсветку)
+router.post('/:id/review', requireRole('admin', 'financier'), async (req, res) => {
+  const { id } = req.params;
+  try {
+    const result = await pool.query(
+      `UPDATE purchases SET reviewed_at = now(), updated_at = now() WHERE id = $1 RETURNING id`,
+      [id]
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
+    }
+    res.json({ status: 'ok', purchase: await fetchPurchaseWithShares(id) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+// Перенос закупки в другой квартал
+router.post('/:id/transfer', requireRole('admin', 'financier'), async (req, res) => {
+  const { id } = req.params;
+  const { to_quarter, reason } = req.body;
+
+  if (!to_quarter || !reason) {
+    return res.status(400).json({ status: 'error', message: 'Укажите квартал и причину переноса' });
   }
 
-  async function restoreItem(id) {
-    try {
-      await apiFetch(`/api/purchases/${id}/restore`, { method: "POST" });
-      load();
-    } catch (err) {
-      setError(err.message);
+  const toQuarter = Number(to_quarter);
+
+  try {
+    const current = await pool.query('SELECT quarter FROM purchases WHERE id = $1', [id]);
+    if (!current.rows[0]) {
+      return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
     }
+    const fromQuarter = current.rows[0].quarter;
+    const noteText = `Перенесено из кв. ${fromQuarter} в кв. ${toQuarter}: ${reason}`;
+
+    // Текст примечания собираем в JS и передаём готовой строкой одним параметром —
+    // так у $1/$2/$3 однозначные типы и нет конфликта text/smallint внутри SQL.
+    const result = await pool.query(
+      `UPDATE purchases SET
+         transfer_note = COALESCE(transfer_note || '; ', '') || $1,
+         quarter = $2,
+         updated_at = now()
+       WHERE id = $3
+       RETURNING id`,
+      [noteText, toQuarter, id]
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
+    }
+    res.json({ status: 'ok', purchase: await fetchPurchaseWithShares(id) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+// Отмена закупки
+router.post('/:id/cancel', requireRole('admin', 'financier'), async (req, res) => {
+  const { id } = req.params;
+  const { reason } = req.body;
+
+  if (!reason) {
+    return res.status(400).json({ status: 'error', message: 'Укажите причину отмены' });
   }
 
-  async function deleteItem(p) {
-    if (!confirm(`Удалить закупку «${p.name}» безвозвратно? Это действие нельзя отменить.`)) return;
-    try {
-      await apiFetch(`/api/purchases/${p.id}`, { method: "DELETE" });
-      load();
-    } catch (err) {
-      setError(err.message);
+  try {
+    const result = await pool.query(
+      `UPDATE purchases SET status = 'cancelled', cancel_reason = $1, updated_at = now()
+       WHERE id = $2
+       RETURNING id`,
+      [reason, id]
+    );
+    if (!result.rows[0]) {
+      return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
     }
+    res.json({ status: 'ok', purchase: await fetchPurchaseWithShares(id) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
   }
+});
 
-  async function persistOrder(newItems) {
-    try {
-      await apiFetch(`/api/purchases/reorder`, {
-        method: "PATCH",
-        body: JSON.stringify({ year, quarter, order: newItems.map((p) => p.id) }),
+// ---------------------------------------------------------------------------
+// Восстановление отменённой закупки (возврат из отмены).
+// Само событие остаётся в purchase_cancellations (история), просто снимаем
+// статус 'cancelled' и чистим причину отмены.
+// ---------------------------------------------------------------------------
+router.post('/:id/restore', requireRole('admin', 'financier'), async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const check = await pool.query('SELECT status FROM purchases WHERE id = $1', [id]);
+
+    if (!check.rows[0]) {
+      return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
+    }
+    if (check.rows[0].status !== 'cancelled') {
+      return res.status(400).json({ status: 'error', message: 'Эта закупка не отменена' });
+    }
+
+    await pool.query(
+      `UPDATE purchases SET status = 'plan', cancel_reason = NULL, updated_at = now()
+       WHERE id = $1`,
+      [id]
+    );
+
+    res.json({ status: 'ok', purchase: await fetchPurchaseWithShares(id) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Полное удаление закупки — только если она уже отменена (status = 'cancelled').
+// Заодно удаляет её файлы служебок (и метаданные, и сами файлы с диска).
+// purchase_branch_shares / purchase_cancellations / purchase_transfers удалятся
+// автоматически через ON DELETE CASCADE.
+// ---------------------------------------------------------------------------
+router.delete('/:id', requireRole('admin', 'financier'), async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const check = await pool.query('SELECT status FROM purchases WHERE id = $1', [id]);
+
+    if (!check.rows[0]) {
+      return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
+    }
+    if (check.rows[0].status !== 'cancelled') {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Удалить можно только отменённую закупку — сначала отмените её',
       });
-    } catch (err) {
-      setError(err.message);
-      load();
-    }
-  }
-
-  function onRowDragStart(e, id) {
-    setDragId(id);
-    e.dataTransfer.effectAllowed = "move";
-    e.dataTransfer.setData("text/plain", String(id));
-  }
-
-  function onRowDragOver(e, id) {
-    if (dragId === null || dragId === id) return;
-    e.preventDefault();
-    e.dataTransfer.dropEffect = "move";
-    if (overId !== id) setOverId(id);
-  }
-
-  function onRowDrop(e, id) {
-    e.preventDefault();
-    if (dragId === null || dragId === id) {
-      setDragId(null);
-      setOverId(null);
-      return;
     }
 
-    setItems((prev) => {
-      const fromIdx = prev.findIndex((p) => p.id === dragId);
-      const toIdx = prev.findIndex((p) => p.id === id);
-      if (fromIdx === -1 || toIdx === -1) return prev;
-      const next = [...prev];
-      const [moved] = next.splice(fromIdx, 1);
-      next.splice(toIdx, 0, moved);
-      const renumbered = next.map((p, idx) => ({ ...p, item_no: idx + 1 }));
-      persistOrder(renumbered);
-      return renumbered;
-    });
-    setDragId(null);
-    setOverId(null);
+    const docs = await pool.query(
+      `SELECT stored_name FROM documents WHERE entity_type = 'purchase' AND entity_id = $1`,
+      [id]
+    );
+
+    await pool.query(`DELETE FROM documents WHERE entity_type = 'purchase' AND entity_id = $1`, [id]);
+    await pool.query('DELETE FROM purchases WHERE id = $1', [id]);
+
+    for (const doc of docs.rows) {
+      fs.unlink(path.join(UPLOAD_DIR, doc.stored_name), () => {});
+    }
+
+    res.json({ status: 'ok' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Импорт плана из Excel (файлы от филиалов/центра — формат "План закупочных
+// мероприятий"). multipart/form-data: file, year, quarter (необязательно —
+// нужен только если в файле нет разделов "1 квартал"/"2 квартал"/...).
+// ---------------------------------------------------------------------------
+router.post('/import', requireRole('admin', 'financier'), (req, res, next) => {
+  memoryUpload.single('file')(req, res, (err) => {
+    if (err) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ status: 'error', message: 'Файл слишком большой (макс. 20 МБ)' });
+      }
+      console.error(err);
+      return res.status(400).json({ status: 'error', message: 'Не удалось прочитать файл' });
+    }
+    next();
+  });
+}, async (req, res) => {
+  const year = Number(req.body.year);
+  const quarterOverride = req.body.quarter ? Number(req.body.quarter) : null;
+
+  if (!req.file) {
+    return res.status(400).json({ status: 'error', message: 'Файл не передан' });
+  }
+  if (!year) {
+    return res.status(400).json({ status: 'error', message: 'Укажите год' });
   }
 
-  function onRowDragEnd() {
-    setDragId(null);
-    setOverId(null);
+  let groups;
+  try {
+    groups = parsePlanSheet(req.file.buffer, quarterOverride);
+  } catch (err) {
+    return res.status(400).json({ status: 'error', message: err.message });
   }
 
-  function openContextMenu(e, p) {
-    e.preventDefault();
-    setMenu({ x: e.clientX, y: e.clientY, purchase: p });
+  if (groups.length === 0) {
+    return res.status(400).json({ status: 'error', message: 'В файле не найдено ни одной строки с закупкой' });
   }
 
-  function contextMenuItems(p) {
-    const items = [];
-    if (canEdit) {
-      items.push({ label: "Изменить", icon: "✏️", onClick: () => startEdit(p) });
-    }
-    items.push({ label: "Файлы служебок", icon: "📎", onClick: () => setFilesFor(p) });
-    items.push({
-      label: p.notes_count > 0 ? `Заметки (${p.notes_count})` : "Заметки",
-      icon: "📝",
-      onClick: () => setNotesFor(p),
-    });
-    if (canReview && p.source === "branch" && !p.reviewed_at) {
-      items.push({ divider: true });
-      items.push({ label: "Отметить просмотренным", icon: "✓", onClick: () => review(p.id) });
-    }
-    if (canReview && p.status === "plan") {
-      items.push({ divider: true });
-      items.push({ label: "Перенести в другой квартал", icon: "↷", onClick: () => transfer(p.id) });
-      items.push({ label: "Отменить закупку", icon: "⊘", danger: true, onClick: () => cancelItem(p.id) });
-    }
-    if (canReview && p.status === "cancelled") {
-      items.push({ divider: true });
-      items.push({ label: "Вернуть из отмены", icon: "↺", onClick: () => restoreItem(p.id) });
-      items.push({ label: "Удалить безвозвратно", icon: "🗑", danger: true, onClick: () => deleteItem(p) });
-    }
-    return items;
+  let branchRows;
+  try {
+    branchRows = (await pool.query('SELECT id, name FROM branches WHERE is_active = true')).rows;
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
   }
 
-  return (
-    <div>
-      <div style={styles.header}>
-        <h2 style={styles.title}>{title}</h2>
-        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
-          {!search && (
-            <input
-              placeholder="Фильтр по этой странице…"
-              value={localSearch}
-              onChange={(e) => setLocalSearch(e.target.value)}
-              style={styles.filterInput}
-            />
-          )}
-          {canImport && (
-            <button type="button" onClick={() => setImporting(true)} style={styles.secondaryButton} className="secondary-btn">
-              Импорт из Excel
-            </button>
-          )}
-          {canEdit && (
-            <button type="button" onClick={startNew} style={styles.primaryButton} className="primary-btn">
-              + Добавить закупку
-            </button>
-          )}
-        </div>
-      </div>
+  const norm = (s) => String(s || '').trim().toLowerCase();
+  const branchByName = new Map(branchRows.map((b) => [norm(b.name), b.id]));
 
-      {error && <div style={styles.errorBox}>{error}</div>}
+  const unmatchedBranches = new Set();
+  const skipped = [];
+  let created = 0;
 
-      <div style={styles.legend}>
-        <span><i style={{ ...styles.dot, background: "var(--highlight-new-border)" }} /> новое от филиала — не просмотрено</span>
-        <span><i style={{ ...styles.dot, background: "var(--unplanned-border)" }} /> внеплановая закупка</span>
-        <span><i style={{ ...styles.dot, background: "var(--cancelled-text)" }} /> отменено</span>
-        {canReorder && <span style={styles.legendHint}>⋮⋮ — перетащите, чтобы изменить порядок · ПКМ по строке — быстрые действия</span>}
-        {!canReorder && <span style={styles.legendHint}>ПКМ по строке — быстрые действия</span>}
-      </div>
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-      <div style={styles.tableWrap}>
-        <table>
-          <thead>
-            <tr>
-              {canReorder && <th style={{ ...styles.th, width: 28 }}></th>}
-              <th style={styles.th}>№ п/п</th>
-              {showQuarterColumn && <th style={styles.th}>Кв.</th>}
-              <th style={styles.th}>Наименование закупки (предмет договора)</th>
-              <th style={styles.th}>Группа продукции (АСГОР)</th>
-              <th style={styles.th}>Способ размещения закупки</th>
-              <th style={styles.th}>Обоснование закупки у ЕП</th>
-              <th style={styles.th}>Плановая дата подачи ТЗ/спецификации</th>
-              <th style={styles.th}>Плановая дата размещения извещения</th>
-              <th style={styles.th}>НМЦ договора, руб.</th>
-              <th style={styles.th}>Потребители</th>
-              <th style={styles.th}>Срок исполнения договора</th>
-              <th style={styles.th}>Код по ОКПД 2</th>
-              <th style={styles.th}>Статус</th>
-              <th style={styles.th}></th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading && (
-              <tr><td colSpan={15} style={styles.emptyCell}>Загрузка…</td></tr>
-            )}
-            {!loading && items.length === 0 && (
-              <tr><td colSpan={15} style={styles.emptyCell}>Пока нет закупок</td></tr>
-            )}
-            {!loading && items.map((p) => {
-              const isDragging = dragId === p.id;
-              const isDropTarget = overId === p.id && dragId !== null && dragId !== p.id;
-              return (
-                <tr
-                  key={p.id}
-                  className="purchase-row"
-                  style={{
-                    ...rowStyle(p),
-                    opacity: isDragging ? 0.4 : 1,
-                    boxShadow: isDropTarget ? "inset 0 2px 0 var(--accent)" : "none",
-                    cursor: "context-menu",
-                  }}
-                  draggable={canReorder}
-                  onDragStart={canReorder ? (e) => onRowDragStart(e, p.id) : undefined}
-                  onDragOver={canReorder ? (e) => onRowDragOver(e, p.id) : undefined}
-                  onDrop={canReorder ? (e) => onRowDrop(e, p.id) : undefined}
-                  onDragEnd={canReorder ? onRowDragEnd : undefined}
-                  onContextMenu={(e) => openContextMenu(e, p)}
-                >
-                  {canReorder && (
-                    <td style={{ ...styles.td, ...styles.dragHandleCell }} title="Перетащите, чтобы изменить порядок">
-                      <span style={styles.dragHandle} className="drag-handle">⋮⋮</span>
-                    </td>
-                  )}
-                  <td style={styles.td}>{p.item_no ?? "—"}</td>
-                  {showQuarterColumn && (
-                    <td style={styles.td}>
-                      <span
-                        style={{
-                          ...styles.quarterBadge,
-                          background: `${QUARTER_COLORS[p.quarter] || "var(--text-muted)"}22`,
-                          color: QUARTER_COLORS[p.quarter] || "var(--text-muted)",
-                        }}
-                      >
-                        {p.quarter}
-                      </span>
-                    </td>
-                  )}
-                  <td style={styles.td}>
-                    {p.name}
-                    {Number(p.notes_count) > 0 && (
-                      <span style={styles.notesBadge} title={`Заметок: ${p.notes_count}`}>📝 {p.notes_count}</span>
-                    )}
-                    {Number(p.documents_count) > 0 && (
-                      <span style={styles.notesBadge} title={`Файлов служебок: ${p.documents_count}`}>📎 {p.documents_count}</span>
-                    )}
-                  </td>
-                  <td style={styles.td}>{p.product_group || "—"}</td>
-                  <td style={styles.td}>{p.method || "—"}</td>
-                  <td style={styles.td}>{p.justification || "—"}</td>
-                  <td style={styles.td}>{p.tz_date ? p.tz_date.slice(0, 10) : "—"}</td>
-                  <td style={styles.td}>{p.notice_date ? p.notice_date.slice(0, 10) : "—"}</td>
-                  <td style={{ ...styles.td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtMoney(p.amount)}</td>
-                  <td style={styles.td}>
-                    {p.shares && p.shares.length > 1 ? (
-                      <div>
-                        <div>{p.shares.length} филиала(ов)</div>
-                        <div style={styles.sharesBreakdown}>
-                          {p.shares.map((s) => `${s.branch_name}: ${fmtMoney(s.amount)}`).join("; ")}
-                        </div>
-                      </div>
-                    ) : (
-                      p.branch_name || "—"
-                    )}
-                  </td>
-                  <td style={styles.td}>{p.deadline || "—"}</td>
-                  <td style={styles.td}>{p.okpd2 || "—"}</td>
-                  <td style={styles.td}>{statusLabel(p.status)}</td>
-                  <td style={{ ...styles.td, whiteSpace: "nowrap" }}>
-                    <div style={styles.actionsRow}>
-                      {canEdit && (
-                        <button type="button" onClick={() => startEdit(p)} style={styles.iconButton} className="icon-btn" title="Изменить">
-                          ✏️
-                        </button>
-                      )}
-                      <button type="button" onClick={() => setFilesFor(p)} style={styles.iconButton} className="icon-btn" title="Файлы служебок">
-                        📎
-                      </button>
-                      <button type="button" onClick={() => setNotesFor(p)} style={styles.iconButton} className="icon-btn" title="Заметки">
-                        📝
-                      </button>
-                      {canReview && p.source === "branch" && !p.reviewed_at && (
-                        <button type="button" onClick={() => review(p.id)} style={styles.iconButton} className="icon-btn" title="Отметить просмотренным">
-                          ✓
-                        </button>
-                      )}
-                      {canReview && p.status === "plan" && (
-                        <>
-                          <button type="button" onClick={() => transfer(p.id)} style={styles.iconButton} className="icon-btn" title="Перенести в другой квартал">
-                            ↷
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => cancelItem(p.id)}
-                            style={{ ...styles.iconButton, color: "var(--danger)" }} className="icon-btn"
-                            title="Отменить закупку"
-                          >
-                            ⊘
-                          </button>
-                        </>
-                      )}
-                      {canReview && p.status === "cancelled" && (
-                        <>
-                          <button
-                            type="button"
-                            onClick={() => restoreItem(p.id)}
-                            style={styles.iconButton} className="icon-btn"
-                            title="Вернуть из отмены"
-                          >
-                            ↺
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => deleteItem(p)}
-                            style={{ ...styles.iconButton, color: "var(--danger)" }} className="icon-btn"
-                            title="Удалить безвозвратно"
-                          >
-                            🗑
-                          </button>
-                        </>
-                      )}
-                      <button
-                        type="button"
-                        onClick={(e) => openContextMenu(e, p)}
-                        style={styles.iconButton} className="icon-btn"
-                        title="Ещё действия"
-                      >
-                        ⋯
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
-      </div>
+    for (const g of groups) {
+      if (!g.quarter) {
+        skipped.push(`«${g.name}»: не удалось определить квартал (нет разделов "N квартал" в файле и не указан квартал по умолчанию)`);
+        continue;
+      }
 
-      {!loading && items.length > 0 && (
-        <div style={styles.statsBar}>
-          <div style={styles.statCard}>
-            <div style={styles.statLabel}>Итого по странице</div>
-            <div style={styles.statValue}>{fmtMoney(stats.total)} ₽</div>
-          </div>
-          <div style={styles.statCard}>
-            <div style={styles.statLabel}>Активных закупок</div>
-            <div style={styles.statValue}>{stats.count}</div>
-          </div>
-          {stats.pendingReview > 0 && (
-            <div style={{ ...styles.statCard, borderColor: "var(--highlight-new-border)" }}>
-              <div style={styles.statLabel}>Не просмотрено</div>
-              <div style={{ ...styles.statValue, color: "var(--warning)" }}>{stats.pendingReview}</div>
-            </div>
-          )}
-          {stats.unplanned > 0 && (
-            <div style={{ ...styles.statCard, borderColor: "var(--unplanned-border)" }}>
-              <div style={styles.statLabel}>Внеплановых</div>
-              <div style={{ ...styles.statValue, color: "var(--danger)" }}>{stats.unplanned}</div>
-            </div>
-          )}
-          {stats.cancelled > 0 && (
-            <div style={styles.statCard}>
-              <div style={styles.statLabel}>Отменено</div>
-              <div style={{ ...styles.statValue, color: "var(--text-muted)" }}>{stats.cancelled}</div>
-            </div>
-          )}
-        </div>
-      )}
+      const resolvedShares = [];
+      for (const s of g.shares) {
+        const branchId = branchByName.get(norm(s.branchNameRaw));
+        if (!branchId) {
+          unmatchedBranches.add(s.branchNameRaw);
+          continue;
+        }
+        resolvedShares.push({ branch_id: branchId, amount: s.amount });
+      }
 
-      {!loading && quarterTotals.length > 0 && (
-        <div style={styles.quarterTotalsBar}>
-          {quarterTotals.map((qt) => (
-            <div key={qt.quarter} style={styles.quarterTotalRow}>
-              <strong style={{ color: QUARTER_COLORS[qt.quarter] || "var(--text)" }}>
-                Итого {qt.quarter} квартал:
-              </strong>
-              <span>{fmtMoney(qt.total)} ₽</span>
-              <span>·</span>
-              <span>по центру: {fmtMoney(qt.center)} ₽</span>
-            </div>
-          ))}
-          {quarterTotals.length > 1 && (
-            <div style={{ ...styles.quarterTotalRow, fontWeight: 700, color: "var(--text)" }}>
-              <span>Итого за год:</span>
-              <span>{fmtMoney(quarterTotals.reduce((s, q) => s + q.total, 0))} ₽</span>
-              <span>·</span>
-              <span>по центру: {fmtMoney(quarterTotals.reduce((s, q) => s + q.center, 0))} ₽</span>
-            </div>
-          )}
-        </div>
-      )}
+      if (resolvedShares.length === 0) {
+        skipped.push(`«${g.name}»: филиал(ы) не найдены в системе (${g.shares.map((s) => s.branchNameRaw).join(', ')})`);
+        continue;
+      }
 
-      {editing && (
-        <EditModal
-          form={form}
-          setForm={setForm}
-          branches={branches}
-          isNew={editing === "new"}
-          onCancel={() => setEditing(null)}
-          onSave={save}
-        />
-      )}
+      const amountTotal = resolvedShares.reduce((sum, s) => sum + s.amount, 0);
 
-      {filesFor && (
-        <DocumentsModal
-          entityType="purchase"
-          entityId={filesFor.id}
-          title={filesFor.name}
-          onClose={() => setFilesFor(null)}
-        />
-      )}
+      const purchaseResult = await client.query(
+        `INSERT INTO purchases
+          (year, quarter, branch_id, name, product_group, method, justification,
+           tz_date, notice_date, amount, deadline, okpd2, comment, source, created_by)
+         VALUES ($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULL,'center',$12)
+         RETURNING id`,
+        [
+          year, g.quarter, g.name, g.product_group, g.method, g.justification,
+          g.tz_date, g.notice_date, amountTotal, g.deadline, g.okpd2, req.user.userId,
+        ]
+      );
+      const purchaseId = purchaseResult.rows[0].id;
 
-      {notesFor && (
-        <NotesModal
-          purchase={notesFor}
-          onClose={() => setNotesFor(null)}
-          onChanged={load}
-        />
-      )}
+      for (const s of resolvedShares) {
+        await client.query(
+          `INSERT INTO purchase_branch_shares (purchase_id, branch_id, amount) VALUES ($1,$2,$3)`,
+          [purchaseId, s.branch_id, s.amount]
+        );
+      }
 
-      {importing && (
-        <ImportExcelModal
-          year={year}
-          defaultQuarter={quarter}
-          onClose={() => setImporting(false)}
-          onImported={load}
-        />
-      )}
+      created += 1;
+    }
 
-      {menu && (
-        <ContextMenu
-          x={menu.x}
-          y={menu.y}
-          items={contextMenuItems(menu.purchase)}
-          onClose={() => setMenu(null)}
-        />
-      )}
-    </div>
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    return res.status(500).json({ status: 'error', message: 'Ошибка при импорте: ' + err.message });
+  } finally {
+    client.release();
+  }
+
+  res.json({
+    status: 'ok',
+    created,
+    skipped,
+    unmatchedBranches: [...unmatchedBranches],
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Вспомогательные функции
+// ---------------------------------------------------------------------------
+
+async function fetchPurchaseWithShares(id) {
+  const result = await pool.query(
+    `SELECT p.*,
+            b.name AS branch_name_legacy,
+            COALESCE(
+              (SELECT json_agg(json_build_object('branch_id', bb.id, 'branch_name', bb.name, 'amount', s.amount) ORDER BY bb.name)
+               FROM purchase_branch_shares s
+               JOIN branches bb ON bb.id = s.branch_id
+               WHERE s.purchase_id = p.id),
+              '[]'
+            ) AS shares,
+            (SELECT COUNT(*) FROM purchase_notes n WHERE n.purchase_id = p.id) AS notes_count
+     FROM purchases p
+     LEFT JOIN branches b ON b.id = p.branch_id
+     WHERE p.id = $1`,
+    [id]
   );
+  const p = result.rows[0];
+  if (!p) return null;
+  const { branch_name_legacy, ...rest } = p;
+  const branchName =
+    rest.shares && rest.shares.length > 0
+      ? rest.shares.map((s) => s.branch_name).join(', ')
+      : branch_name_legacy || '—';
+  return { ...rest, branch_name: branchName };
 }
 
-function statusLabel(status) {
-  const map = {
-    plan: "в плане",
-    transferred: "перенесено",
-    cancelled: "отменено",
-    unplanned: "внеплан",
-    done: "исполнено",
+// Разбор листа "План закупочных мероприятий" в список групп-закупок.
+// Каждая группа — одна закупка, возможно, с несколькими филиалами (shares).
+//
+// Логика: строка со числом в колонке "№ п/п" начинает новую закупку; строки
+// без номера, но с суммой и филиалом — это ещё один филиал ТОЙ ЖЕ закупки
+// (в исходных файлах так оформлены закупки на несколько филиалов).
+// Строки "N квартал" переключают текущий квартал для следующих строк.
+// Строки "Итого..." игнорируются.
+function parsePlanSheet(buffer, quarterOverride) {
+  const wb = XLSX.read(buffer, { type: 'buffer' });
+  const sheetName = wb.SheetNames[0];
+  const ws = wb.Sheets[sheetName];
+  const rows = XLSX.utils.sheet_to_json(ws, { header: 1, raw: true, defval: '' });
+
+  let headerRowIdx = -1;
+  for (let i = 0; i < rows.length; i++) {
+    if (rows[i].some((c) => String(c).replace(/\s+/g, '').toLowerCase().includes('№п/п'))) {
+      headerRowIdx = i;
+      break;
+    }
+  }
+  if (headerRowIdx === -1) {
+    throw new Error('Не найдена строка заголовка таблицы (ожидается колонка "№ п/п")');
+  }
+  const headerRow = rows[headerRowIdx];
+
+  const findCol = (patterns) => {
+    for (let c = 0; c < headerRow.length; c++) {
+      const cellText = String(headerRow[c] || '').toLowerCase();
+      if (patterns.some((p) => cellText.includes(p))) return c;
+    }
+    return -1;
   };
-  return map[status] || status;
+
+  const col = {
+    num: findCol(['№ п/п', '№п/п', '№']),
+    name: findCol(['наименование']),
+    productGroup: findCol(['группа продукции', 'асгор']),
+    method: findCol(['способ размещения']),
+    justification: findCol(['обоснование']),
+    tzDate: findCol(['подачи тз', 'подачи спецификации', 'родачи тз']),
+    noticeDate: findCol(['размещения извещения']),
+    amount: findCol(['нмц']),
+    branch: findCol(['потребител']),
+    deadline: findCol(['срок исполнения']),
+    okpd2: findCol(['окпд']),
+  };
+
+  if (col.name === -1 || col.amount === -1 || col.branch === -1) {
+    throw new Error('Не удалось распознать колонки листа (нужны минимум "Наименование", "НМЦ" и "Потребители")');
+  }
+
+  const text = (v) => (v === null || v === undefined ? '' : String(v).trim());
+
+  const parseAmount = (v) => {
+    if (v === null || v === undefined || v === '') return null;
+    const n = Number(String(v).replace(/[^\d.,-]/g, '').replace(',', '.'));
+    return Number.isFinite(n) && n > 0 ? n : null;
+  };
+
+  const excelDateToSQL = (v) => {
+    if (v === null || v === undefined || v === '') return null;
+    if (typeof v === 'number') {
+      const d = XLSX.SSF.parse_date_code(v);
+      if (d && d.y) return `${d.y}-${String(d.m).padStart(2, '0')}-${String(d.d).padStart(2, '0')}`;
+      return null;
+    }
+    const m = String(v).match(/(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})/);
+    if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    return null;
+  };
+
+  const deadlineText = (v) => {
+    if (v === null || v === undefined || v === '') return null;
+    if (typeof v === 'number') {
+      const d = XLSX.SSF.parse_date_code(v);
+      if (d && d.y) return `${String(d.d).padStart(2, '0')}.${String(d.m).padStart(2, '0')}.${d.y}`;
+    }
+    return text(v) || null;
+  };
+
+  const groups = [];
+  let currentQuarter = quarterOverride;
+  let currentGroup = null;
+
+  const flush = () => {
+    if (currentGroup) groups.push(currentGroup);
+    currentGroup = null;
+  };
+
+  for (let i = headerRowIdx + 1; i < rows.length; i++) {
+    const row = rows[i];
+    // Маркеры "N квартал" / "Итого ..." в исходных файлах всегда стоят
+    // именно в колонке "№ п/п" — проверяем только её. Проверка по всей
+    // строке ошибочна: например, название филиала "Магнитогорск"
+    // содержит подстроку "итого" и ложно принималось бы за итоговую строку.
+    const numTextLower = text(row[col.num]).toLowerCase();
+    const numText = text(row[col.num]);
+
+    if (numTextLower.includes('квартал')) {
+      const m = numTextLower.match(/\d/);
+      if (m) currentQuarter = Number(m[0]);
+      flush();
+      continue;
+    }
+    if (numTextLower.includes('итог')) {
+      flush();
+      continue;
+    }
+
+    const nameVal = text(row[col.name]);
+    const amountVal = parseAmount(row[col.amount]);
+    const branchVal = text(row[col.branch]);
+
+    if (!nameVal && amountVal === null && !branchVal) continue; // пустая строка-разделитель
+
+    const isNewItem = /^\d+$/.test(numText);
+
+    if (isNewItem) {
+      flush();
+      currentGroup = {
+        quarter: currentQuarter,
+        name: nameVal,
+        product_group: col.productGroup !== -1 ? text(row[col.productGroup]) || null : null,
+        method: col.method !== -1 ? text(row[col.method]) || null : null,
+        justification: col.justification !== -1 ? text(row[col.justification]) || null : null,
+        tz_date: col.tzDate !== -1 ? excelDateToSQL(row[col.tzDate]) : null,
+        notice_date: col.noticeDate !== -1 ? excelDateToSQL(row[col.noticeDate]) : null,
+        deadline: col.deadline !== -1 ? deadlineText(row[col.deadline]) : null,
+        okpd2: col.okpd2 !== -1 ? text(row[col.okpd2]) || null : null,
+        shares: [],
+      };
+      if (amountVal !== null && branchVal) {
+        currentGroup.shares.push({ branchNameRaw: branchVal, amount: amountVal });
+      }
+    } else if (currentGroup && amountVal !== null && branchVal) {
+      // Продолжение предыдущей закупки — ещё один филиал с своей суммой
+      currentGroup.shares.push({ branchNameRaw: branchVal, amount: amountVal });
+    }
+  }
+  flush();
+
+  return groups.filter((g) => g.name && g.shares.length > 0);
 }
 
-function EditModal({ form, setForm, branches, isNew, onCancel, onSave }) {
-  function set(field, value) {
-    setForm((f) => ({ ...f, [field]: value }));
-  }
-
-  function updateShare(idx, field, value) {
-    setForm((f) => {
-      const shares = f.shares.map((s, i) => (i === idx ? { ...s, [field]: value } : s));
-      return { ...f, shares };
-    });
-  }
-
-  function addShare() {
-    setForm((f) => ({ ...f, shares: [...f.shares, { ...EMPTY_SHARE, branch_id: branches[0]?.id || "" }] }));
-  }
-
-  function removeShare(idx) {
-    setForm((f) => ({ ...f, shares: f.shares.filter((_, i) => i !== idx) }));
-  }
-
-  const sharesTotal = form.shares.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
-
-  return (
-    <div style={styles.modalOverlay}>
-      <div style={styles.modal}>
-        <h3 style={{ marginTop: 0 }}>{isNew ? "Новая закупка" : "Редактирование закупки"}</h3>
-        <div style={styles.formGrid}>
-          <label style={styles.label}>
-            Квартал
-            <select value={form.quarter} onChange={(e) => set("quarter", Number(e.target.value))} style={styles.input}>
-              {[1, 2, 3, 4].map((q) => <option key={q} value={q}>{q}</option>)}
-            </select>
-          </label>
-          <label style={{ ...styles.label, gridColumn: "1 / -1" }}>
-            Наименование закупки
-            <input value={form.name} onChange={(e) => set("name", e.target.value)} style={styles.input} />
-          </label>
-          <label style={{ ...styles.label, gridColumn: "1 / -1" }}>
-            Филиалы и суммы (НМЦ)
-            <div style={styles.sharesList}>
-              {form.shares.map((sh, idx) => (
-                <div key={idx} style={styles.shareRow}>
-                  <select
-                    value={sh.branch_id}
-                    onChange={(e) => updateShare(idx, "branch_id", e.target.value)}
-                    style={{ ...styles.input, flex: 2 }}
-                  >
-                    <option value="">— филиал —</option>
-                    {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-                  </select>
-                  <input
-                    type="number"
-                    placeholder="Сумма, руб."
-                    value={sh.amount}
-                    onChange={(e) => updateShare(idx, "amount", e.target.value)}
-                    style={{ ...styles.input, flex: 1 }}
-                  />
-                  {form.shares.length > 1 && (
-                    <button type="button" onClick={() => removeShare(idx)} style={styles.removeShareButton} title="Убрать филиал">
-                      ✕
-                    </button>
-                  )}
-                </div>
-              ))}
-              <div style={styles.sharesFooter}>
-                <button type="button" onClick={addShare} style={styles.linkButton}>+ добавить филиал</button>
-                <span style={styles.sharesTotal}>Итого по закупке: {fmtMoney(sharesTotal)} руб.</span>
-              </div>
-            </div>
-          </label>
-          <label style={styles.label}>
-            Группа продукции (АСГОР)
-            <input value={form.product_group} onChange={(e) => set("product_group", e.target.value)} style={styles.input} />
-          </label>
-          <label style={styles.label}>
-            Способ размещения
-            <select value={form.method} onChange={(e) => set("method", e.target.value)} style={styles.input}>
-              {METHODS.map((m) => <option key={m} value={m}>{m}</option>)}
-            </select>
-          </label>
-          <label style={{ ...styles.label, gridColumn: "1 / -1" }}>
-            Обоснование закупки у ЕП
-            <input value={form.justification} onChange={(e) => set("justification", e.target.value)} style={styles.input} />
-          </label>
-          <label style={styles.label}>
-            Дата подачи ТЗ
-            <input type="date" value={form.tz_date} onChange={(e) => set("tz_date", e.target.value)} style={styles.input} />
-          </label>
-          <label style={styles.label}>
-            Дата размещения извещения
-            <input type="date" value={form.notice_date} onChange={(e) => set("notice_date", e.target.value)} style={styles.input} />
-          </label>
-          <label style={styles.label}>
-            Срок исполнения (мес, год)
-            <input value={form.deadline} onChange={(e) => set("deadline", e.target.value)} style={styles.input} />
-          </label>
-          <label style={styles.label}>
-            Код ОКПД2
-            <input value={form.okpd2} onChange={(e) => set("okpd2", e.target.value)} style={styles.input} />
-          </label>
-          <label style={{ ...styles.label, gridColumn: "1 / -1" }}>
-            Примечание
-            <input value={form.comment} onChange={(e) => set("comment", e.target.value)} style={styles.input} />
-          </label>
-        </div>
-        <div style={styles.modalActions}>
-          <button type="button" onClick={onCancel} style={styles.secondaryButton} className="secondary-btn">Отмена</button>
-          <button type="button" onClick={onSave} style={styles.primaryButton} className="primary-btn">Сохранить</button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-const styles = {
-  header: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 10 },
-  title: { margin: 0, fontSize: 20, color: "var(--text)" },
-  filterInput: { padding: "7px 10px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", width: 220 },
-  primaryButton: { background: "var(--accent)", color: "var(--accent-contrast)", border: "none", borderRadius: "var(--radius-sm)", padding: "8px 14px", cursor: "pointer", fontWeight: 600, transition: "filter 0.15s" },
-  secondaryButton: { background: "var(--surface-2)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "8px 14px", cursor: "pointer" },
-  errorBox: { background: "var(--danger-soft)", color: "var(--danger)", padding: "10px 14px", borderRadius: "var(--radius-sm)", marginBottom: 12 },
-  legend: { display: "flex", gap: 18, fontSize: 12, color: "var(--text-secondary)", marginBottom: 10, flexWrap: "wrap", alignItems: "center" },
-  legendHint: { marginLeft: "auto", fontStyle: "italic", color: "var(--text-muted)" },
-  dot: { display: "inline-block", width: 9, height: 9, borderRadius: "50%", marginRight: 5 },
-  tableWrap: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "auto", boxShadow: "var(--shadow-sm)" },
-  th: { textAlign: "left", padding: "10px 12px", borderBottom: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: 12, textTransform: "uppercase", letterSpacing: 0.3, whiteSpace: "nowrap" },
-  td: { padding: "9px 12px", borderBottom: "1px solid var(--border)", fontSize: 13.5, color: "var(--text)" },
-  dragHandleCell: { padding: "9px 4px", textAlign: "center" },
-  dragHandle: { cursor: "grab", color: "var(--text-muted)", fontSize: 14, userSelect: "none", display: "inline-block", lineHeight: 1 },
-  sharesBreakdown: { fontSize: 11, color: "var(--text-secondary)", marginTop: 2 },
-  notesBadge: { marginLeft: 8, fontSize: 11, color: "var(--text-secondary)", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, padding: "1px 7px", whiteSpace: "nowrap" },
-  quarterBadge: { fontSize: 12, fontWeight: 700, borderRadius: 10, padding: "2px 9px", whiteSpace: "nowrap" },
-  quarterTotalsBar: { marginTop: 10, display: "flex", flexDirection: "column", gap: 4 },
-  quarterTotalRow: { fontSize: 13, color: "var(--text-secondary)", display: "flex", gap: 14, flexWrap: "wrap" },
-  emptyCell: { padding: 24, textAlign: "center", color: "var(--text-muted)" },
-  actionsRow: { display: "flex", gap: 2, alignItems: "center" },
-  iconButton: {
-    border: "none",
-    background: "none",
-    color: "var(--text-secondary)",
-    cursor: "pointer",
-    fontSize: 13,
-    padding: "5px 6px",
-    borderRadius: "var(--radius-sm)",
-    lineHeight: 1,
-  },
-  statsBar: { display: "flex", gap: 12, marginTop: 14, flexWrap: "wrap" },
-  statCard: {
-    background: "var(--surface)",
-    border: "1px solid var(--border)",
-    borderRadius: "var(--radius-sm)",
-    padding: "10px 16px",
-    minWidth: 140,
-    boxShadow: "var(--shadow-sm)",
-  },
-  statLabel: { fontSize: 11, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 0.3 },
-  statValue: { fontSize: 18, fontWeight: 700, color: "var(--text)", marginTop: 3, fontVariantNumeric: "tabular-nums" },
-  linkButton: { border: "none", background: "none", color: "var(--accent)", cursor: "pointer", fontSize: 12.5, marginRight: 10, padding: 0 },
-  modalOverlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 },
-  modal: { background: "var(--surface)", borderRadius: "var(--radius)", padding: 24, width: 640, maxWidth: "92vw", maxHeight: "88vh", overflow: "auto", boxShadow: "var(--shadow-md)", color: "var(--text)" },
-  formGrid: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 },
-  label: { display: "flex", flexDirection: "column", gap: 5, fontSize: 12.5, color: "var(--text-secondary)" },
-  input: { padding: "8px 10px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)" },
-  modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 18 },
-  sharesList: { display: "flex", flexDirection: "column", gap: 8, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: 10 },
-  shareRow: { display: "flex", gap: 8, alignItems: "center" },
-  removeShareButton: { border: "none", background: "none", color: "var(--danger)", cursor: "pointer", fontSize: 14, padding: "4px 6px", flexShrink: 0 },
-  sharesFooter: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, flexWrap: "wrap", gap: 8 },
-  sharesTotal: { fontSize: 12.5, fontWeight: 600, color: "var(--text)" },
-};
+module.exports = router;
