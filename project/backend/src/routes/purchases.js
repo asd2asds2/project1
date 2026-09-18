@@ -427,7 +427,7 @@ router.post('/:id/transfer', requireRole('admin', 'financier'), async (req, res)
     const result = await pool.query(
       `UPDATE purchases SET
          transfer_note = COALESCE(transfer_note || '; ', '')
-           || 'Перенесено из кв. ' || quarter || ' в кв. ' || $1 || ': ' || $2,
+           || 'Перенесено из кв. ' || quarter::text || ' в кв. ' || $1::text || ': ' || $2,
          quarter = $1,
          updated_at = now()
        WHERE id = $3
