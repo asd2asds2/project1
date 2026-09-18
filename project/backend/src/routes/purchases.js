@@ -475,11 +475,14 @@ router.post('/:id/transfer', requireRole('admin', 'financier'), async (req, res)
   const { id } = req.params;
   const { to_quarter, reason } = req.body;
 
-  if (!to_quarter || !reason) {
-    return res.status(400).json({ status: 'error', message: 'Укажите квартал и причину переноса' });
+  if (!to_quarter) {
+    return res.status(400).json({ status: 'error', message: 'Укажите квартал' });
   }
 
   const toQuarter = Number(to_quarter);
+  // Причина теперь необязательна — если не указана, в истории просто не
+  // будет комментария, сам факт переноса всё равно фиксируется.
+  const reasonText = (reason || '').trim();
 
   try {
     const current = await pool.query('SELECT quarter FROM purchases WHERE id = $1', [id]);
@@ -487,7 +490,7 @@ router.post('/:id/transfer', requireRole('admin', 'financier'), async (req, res)
       return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
     }
     const fromQuarter = current.rows[0].quarter;
-    const noteText = `Перенесено из кв. ${fromQuarter} в кв. ${toQuarter}: ${reason}`;
+    const noteText = `Перенесено из кв. ${fromQuarter} в кв. ${toQuarter}${reasonText ? `: ${reasonText}` : ''}`;
 
     // Текст примечания собираем в JS и передаём готовой строкой одним параметром —
     // так у $1/$2/$3 однозначные типы и нет конфликта text/smallint внутри SQL.

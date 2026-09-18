@@ -17,9 +17,10 @@ const PLAN_ITEMS = [
 
 // Событие, которым таблицы закупок оповещаются о переносе строки на филиал
 // или в другой квартал (см. PurchasesTable.jsx), чтобы обновить данные без
-// перезагрузки страницы.
-export function notifyPurchasesChanged() {
-  window.dispatchEvent(new Event("purchases:changed"));
+// перезагрузки страницы. detail.purchase, если передан, — свежая версия
+// закупки с сервера, чтобы таблица могла обновить её на месте мгновенно.
+export function notifyPurchasesChanged(purchase) {
+  window.dispatchEvent(new CustomEvent("purchases:changed", { detail: { purchase } }));
 }
 
 export default function Layout() {
@@ -34,6 +35,18 @@ export default function Layout() {
 
   useEffect(() => {
     apiFetch("/api/branches").then((d) => setBranches(d.branches)).catch(() => {});
+  }, []);
+
+  // Подстраховка от «зависшей» пунктирной подсветки зоны сброса: если drag
+  // завершился не над зоной (dragend без drop, например ESC или отпустили
+  // мимо), сбрасываем оба состояния подсветки в любом случае.
+  useEffect(() => {
+    function onDragEnd() {
+      setDropBranchId(null);
+      setDropQuarter(null);
+    }
+    document.addEventListener("dragend", onDragEnd);
+    return () => document.removeEventListener("dragend", onDragEnd);
   }, []);
 
   function handleSearch(e) {
@@ -61,12 +74,12 @@ export default function Layout() {
     const purchaseId = e.dataTransfer.getData("application/x-purchase-id");
     if (!purchaseId) return;
     try {
-      await apiFetch(`/api/purchases/${purchaseId}/branch`, {
+      const res = await apiFetch(`/api/purchases/${purchaseId}/branch`, {
         method: "PATCH",
         body: JSON.stringify({ branch_id: branch.id }),
       });
       setDropMessage(`Закупка перенесена в «${branch.name}»`);
-      notifyPurchasesChanged();
+      notifyPurchasesChanged(res.purchase);
       setTimeout(() => setDropMessage(""), 2500);
     } catch (err) {
       setDropMessage(`Ошибка: ${err.message}`);
@@ -79,15 +92,17 @@ export default function Layout() {
     setDropQuarter(null);
     const purchaseId = e.dataTransfer.getData("application/x-purchase-id");
     if (!purchaseId) return;
-    const reason = window.prompt(`Причина переноса в ${item.label}:`);
-    if (!reason) return; // отменили — ничего не переносим
+    // Причина переноса необязательна — не спрашиваем её при перетаскивании,
+    // чтобы не показывать браузерное окно "страница сообщает". Если нужно
+    // явно указать причину — это по-прежнему можно сделать через
+    // контекстное меню строки ("Перенести в другой квартал").
     try {
-      await apiFetch(`/api/purchases/${purchaseId}/transfer`, {
+      const res = await apiFetch(`/api/purchases/${purchaseId}/transfer`, {
         method: "POST",
-        body: JSON.stringify({ to_quarter: item.quarter, reason }),
+        body: JSON.stringify({ to_quarter: item.quarter }),
       });
       setDropMessage(`Закупка перенесена в ${item.label}`);
-      notifyPurchasesChanged();
+      notifyPurchasesChanged(res.purchase);
       setTimeout(() => setDropMessage(""), 2500);
     } catch (err) {
       setDropMessage(`Ошибка: ${err.message}`);

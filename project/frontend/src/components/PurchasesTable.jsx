@@ -169,13 +169,36 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
 
   useEffect(() => { load(); }, [load]);
 
-  // Обновляем список после переноса закупки на филиал перетаскиванием в
-  // боковое меню (событие шлёт Layout.jsx после успешного PATCH).
+  // Обновляем список после переноса закупки на филиал/квартал перетаскиванием
+  // в меню (событие шлёт Layout.jsx после успешного PATCH/POST). Если в
+  // событии приехала обновлённая закупка — подставляем её в список сразу же,
+  // не дожидаясь отдельного запроса, чтобы цвет строки (по филиалу/кварталу)
+  // обновился мгновенно без задержки/мигания.
   useEffect(() => {
-    function onChanged() { load(); }
+    function onChanged(e) {
+      const updated = e.detail?.purchase;
+      if (updated && Number(updated.year) === Number(year)) {
+        setItems((prev) => {
+          const idx = prev.findIndex((p) => p.id === updated.id);
+          // Если закупка уехала из текущего фильтра (другой квартал/год) —
+          // просто убираем её из списка; иначе — обновляем на месте.
+          const belongsHere = quarter ? Number(updated.quarter) === Number(quarter) : true;
+          if (idx === -1) {
+            return belongsHere ? prev : prev;
+          }
+          if (!belongsHere) {
+            return prev.filter((p) => p.id !== updated.id);
+          }
+          const next = [...prev];
+          next[idx] = { ...next[idx], ...updated };
+          return next;
+        });
+      }
+      load();
+    }
     window.addEventListener("purchases:changed", onChanged);
     return () => window.removeEventListener("purchases:changed", onChanged);
-  }, [load]);
+  }, [load, year, quarter]);
 
   const stats = useMemo(() => {
     const active = items.filter((i) => i.status !== "cancelled");
@@ -263,10 +286,8 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
   async function transfer(id) {
     const to = prompt("Перенести в какой квартал? (1-4)");
     if (!to) return;
-    const reason = prompt("Причина переноса:");
-    if (!reason) return;
     try {
-      await apiFetch(`/api/purchases/${id}/transfer`, { method: "POST", body: JSON.stringify({ to_quarter: Number(to), reason }) });
+      await apiFetch(`/api/purchases/${id}/transfer`, { method: "POST", body: JSON.stringify({ to_quarter: Number(to) }) });
       load();
     } catch (err) {
       setError(err.message);
