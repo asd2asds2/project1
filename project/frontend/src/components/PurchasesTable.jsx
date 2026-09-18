@@ -1,11 +1,15 @@
 import { useEffect, useMemo, useState, useCallback } from "react";
 import { apiFetch } from "../api";
 import { useAuth } from "../context/AuthContext";
+import DocumentsModal from "./DocumentsModal";
+import ImportExcelModal from "./ImportExcelModal";
 
 const METHODS = ["ЕП", "ЭА", "ЗК", "Р", "Конкурс", "Другое"];
+const EMPTY_SHARE = { branch_id: "", amount: "" };
 const EMPTY_FORM = {
-  quarter: 1, branch_id: "", name: "", product_group: "", method: "ЕП",
-  justification: "", tz_date: "", notice_date: "", amount: "", deadline: "", okpd2: "", comment: "",
+  quarter: 1, name: "", product_group: "", method: "ЕП",
+  justification: "", tz_date: "", notice_date: "", deadline: "", okpd2: "", comment: "",
+  shares: [{ ...EMPTY_SHARE }],
 };
 
 function fmtMoney(n) {
@@ -32,6 +36,7 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
   const { user } = useAuth();
   const canEdit = user?.role === "admin" || user?.role === "financier" || user?.role === "branch_editor";
   const canReview = user?.role === "admin" || user?.role === "financier";
+  const canImport = user?.role === "admin" || user?.role === "financier";
 
   const [items, setItems] = useState([]);
   const [branches, setBranches] = useState([]);
@@ -40,6 +45,8 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
   const [localSearch, setLocalSearch] = useState("");
   const [editing, setEditing] = useState(null); // id закупки, которую редактируем, или "new"
   const [form, setForm] = useState(EMPTY_FORM);
+  const [filesFor, setFilesFor] = useState(null); // закупка, для которой открыта модалка файлов
+  const [importing, setImporting] = useState(false);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -73,25 +80,42 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
 
   function startEdit(p) {
     setEditing(p.id);
+    const shares =
+      p.shares && p.shares.length > 0
+        ? p.shares.map((s) => ({ branch_id: s.branch_id, amount: s.amount }))
+        : [{ branch_id: p.branch_id || "", amount: p.amount || "" }];
     setForm({
-      quarter: p.quarter, branch_id: p.branch_id, name: p.name, product_group: p.product_group || "",
+      quarter: p.quarter, name: p.name, product_group: p.product_group || "",
       method: p.method || "ЕП", justification: p.justification || "",
       tz_date: p.tz_date ? p.tz_date.slice(0, 10) : "", notice_date: p.notice_date ? p.notice_date.slice(0, 10) : "",
-      amount: p.amount, deadline: p.deadline || "", okpd2: p.okpd2 || "", comment: p.comment || "",
+      deadline: p.deadline || "", okpd2: p.okpd2 || "", comment: p.comment || "",
+      shares,
     });
   }
 
   function startNew() {
     setEditing("new");
-    setForm({ ...EMPTY_FORM, quarter: quarter || 1, branch_id: branches[0]?.id || "" });
+    setForm({ ...EMPTY_FORM, quarter: quarter || 1, shares: [{ branch_id: branches[0]?.id || "", amount: "" }] });
   }
 
   async function save() {
+    const cleanShares = form.shares
+      .map((s) => ({ branch_id: Number(s.branch_id), amount: Number(s.amount) }))
+      .filter((s) => s.branch_id && s.amount > 0);
+
+    if (cleanShares.length === 0) {
+      setError("Укажите хотя бы один филиал и сумму больше нуля");
+      return;
+    }
+
+    const payload = { ...form, shares: cleanShares };
+    delete payload.branch_id;
+
     try {
       if (editing === "new") {
-        await apiFetch(`/api/purchases`, { method: "POST", body: JSON.stringify({ ...form, year }) });
+        await apiFetch(`/api/purchases`, { method: "POST", body: JSON.stringify({ ...payload, year }) });
       } else {
-        await apiFetch(`/api/purchases/${editing}`, { method: "PUT", body: JSON.stringify(form) });
+        await apiFetch(`/api/purchases/${editing}`, { method: "PUT", body: JSON.stringify(payload) });
       }
       setEditing(null);
       load();
@@ -137,7 +161,7 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
     <div>
       <div style={styles.header}>
         <h2 style={styles.title}>{title}</h2>
-        <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+        <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
           {!search && (
             <input
               placeholder="Фильтр по этой странице…"
@@ -145,6 +169,11 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
               onChange={(e) => setLocalSearch(e.target.value)}
               style={styles.filterInput}
             />
+          )}
+          {canImport && (
+            <button type="button" onClick={() => setImporting(true)} style={styles.secondaryButton}>
+              Импорт из Excel
+            </button>
           )}
           {canEdit && (
             <button type="button" onClick={startNew} style={styles.primaryButton}>
@@ -194,12 +223,24 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                 <td style={styles.td}>{p.product_group || "—"}</td>
                 <td style={styles.td}>{p.method || "—"}</td>
                 <td style={{ ...styles.td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtMoney(p.amount)}</td>
-                <td style={styles.td}>{p.branch_name}</td>
+                <td style={styles.td}>
+                  {p.shares && p.shares.length > 1 ? (
+                    <div>
+                      <div>{p.shares.length} филиала(ов)</div>
+                      <div style={styles.sharesBreakdown}>
+                        {p.shares.map((s) => `${s.branch_name}: ${fmtMoney(s.amount)}`).join("; ")}
+                      </div>
+                    </div>
+                  ) : (
+                    p.branch_name || "—"
+                  )}
+                </td>
                 <td style={styles.td}>{p.deadline || "—"}</td>
                 <td style={styles.td}>{p.okpd2 || "—"}</td>
                 <td style={styles.td}>{statusLabel(p.status)}</td>
                 <td style={{ ...styles.td, whiteSpace: "nowrap" }}>
                   {canEdit && <button type="button" onClick={() => startEdit(p)} style={styles.linkButton}>изм.</button>}
+                  <button type="button" onClick={() => setFilesFor(p)} style={styles.linkButton}>📎 файлы</button>
                   {canReview && p.source === "branch" && !p.reviewed_at && (
                     <button type="button" onClick={() => review(p.id)} style={styles.linkButton}>✓ просмотрено</button>
                   )}
@@ -235,6 +276,24 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
           onSave={save}
         />
       )}
+
+      {filesFor && (
+        <DocumentsModal
+          entityType="purchase"
+          entityId={filesFor.id}
+          title={filesFor.name}
+          onClose={() => setFilesFor(null)}
+        />
+      )}
+
+      {importing && (
+        <ImportExcelModal
+          year={year}
+          defaultQuarter={quarter}
+          onClose={() => setImporting(false)}
+          onImported={load}
+        />
+      )}
     </div>
   );
 }
@@ -255,6 +314,23 @@ function EditModal({ form, setForm, branches, isNew, onCancel, onSave }) {
     setForm((f) => ({ ...f, [field]: value }));
   }
 
+  function updateShare(idx, field, value) {
+    setForm((f) => {
+      const shares = f.shares.map((s, i) => (i === idx ? { ...s, [field]: value } : s));
+      return { ...f, shares };
+    });
+  }
+
+  function addShare() {
+    setForm((f) => ({ ...f, shares: [...f.shares, { ...EMPTY_SHARE, branch_id: branches[0]?.id || "" }] }));
+  }
+
+  function removeShare(idx) {
+    setForm((f) => ({ ...f, shares: f.shares.filter((_, i) => i !== idx) }));
+  }
+
+  const sharesTotal = form.shares.reduce((sum, s) => sum + (Number(s.amount) || 0), 0);
+
   return (
     <div style={styles.modalOverlay}>
       <div style={styles.modal}>
@@ -268,16 +344,43 @@ function EditModal({ form, setForm, branches, isNew, onCancel, onSave }) {
             </select>
           </label>
 
-          <label style={styles.label}>
-            Филиал
-            <select value={form.branch_id} onChange={(e) => set("branch_id", Number(e.target.value))} style={styles.input}>
-              {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
-            </select>
-          </label>
-
           <label style={{ ...styles.label, gridColumn: "1 / -1" }}>
             Наименование закупки
             <input value={form.name} onChange={(e) => set("name", e.target.value)} style={styles.input} />
+          </label>
+
+          <label style={{ ...styles.label, gridColumn: "1 / -1" }}>
+            Филиалы и суммы (НМЦ)
+            <div style={styles.sharesList}>
+              {form.shares.map((sh, idx) => (
+                <div key={idx} style={styles.shareRow}>
+                  <select
+                    value={sh.branch_id}
+                    onChange={(e) => updateShare(idx, "branch_id", e.target.value)}
+                    style={{ ...styles.input, flex: 2 }}
+                  >
+                    <option value="">— филиал —</option>
+                    {branches.map((b) => <option key={b.id} value={b.id}>{b.name}</option>)}
+                  </select>
+                  <input
+                    type="number"
+                    placeholder="Сумма, руб."
+                    value={sh.amount}
+                    onChange={(e) => updateShare(idx, "amount", e.target.value)}
+                    style={{ ...styles.input, flex: 1 }}
+                  />
+                  {form.shares.length > 1 && (
+                    <button type="button" onClick={() => removeShare(idx)} style={styles.removeShareButton} title="Убрать филиал">
+                      ✕
+                    </button>
+                  )}
+                </div>
+              ))}
+              <div style={styles.sharesFooter}>
+                <button type="button" onClick={addShare} style={styles.linkButton}>+ добавить филиал</button>
+                <span style={styles.sharesTotal}>Итого по закупке: {fmtMoney(sharesTotal)} руб.</span>
+              </div>
+            </div>
           </label>
 
           <label style={styles.label}>
@@ -305,11 +408,6 @@ function EditModal({ form, setForm, branches, isNew, onCancel, onSave }) {
           <label style={styles.label}>
             Дата размещения извещения
             <input type="date" value={form.notice_date} onChange={(e) => set("notice_date", e.target.value)} style={styles.input} />
-          </label>
-
-          <label style={styles.label}>
-            НМЦ, руб.
-            <input type="number" value={form.amount} onChange={(e) => set("amount", e.target.value)} style={styles.input} />
           </label>
 
           <label style={styles.label}>
@@ -349,6 +447,7 @@ const styles = {
   tableWrap: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "auto", boxShadow: "var(--shadow-sm)" },
   th: { textAlign: "left", padding: "10px 12px", borderBottom: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: 12, textTransform: "uppercase", letterSpacing: 0.3, whiteSpace: "nowrap" },
   td: { padding: "9px 12px", borderBottom: "1px solid var(--border)", fontSize: 13.5, color: "var(--text)" },
+  sharesBreakdown: { fontSize: 11, color: "var(--text-secondary)", marginTop: 2 },
   emptyCell: { padding: 24, textAlign: "center", color: "var(--text-muted)" },
   totalLabel: { padding: "10px 12px", fontWeight: 700, textAlign: "right", color: "var(--text)" },
   totalValue: { padding: "10px 12px", fontWeight: 700, color: "var(--text)", fontVariantNumeric: "tabular-nums" },
@@ -359,4 +458,9 @@ const styles = {
   label: { display: "flex", flexDirection: "column", gap: 5, fontSize: 12.5, color: "var(--text-secondary)" },
   input: { padding: "8px 10px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text)" },
   modalActions: { display: "flex", justifyContent: "flex-end", gap: 10, marginTop: 18 },
+  sharesList: { display: "flex", flexDirection: "column", gap: 8, background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: 10 },
+  shareRow: { display: "flex", gap: 8, alignItems: "center" },
+  removeShareButton: { border: "none", background: "none", color: "var(--danger)", cursor: "pointer", fontSize: 14, padding: "4px 6px", flexShrink: 0 },
+  sharesFooter: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, flexWrap: "wrap", gap: 8 },
+  sharesTotal: { fontSize: 12.5, fontWeight: 600, color: "var(--text)" },
 };

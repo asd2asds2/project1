@@ -7,6 +7,7 @@ const healthRoutes = require('./routes/health');
 const authRoutes = require('./routes/auth');
 const branchesRoutes = require('./routes/branches');
 const purchasesRoutes = require('./routes/purchases');
+const documentsRoutes = require('./routes/documents');
 
 const app = express();
 
@@ -18,6 +19,7 @@ app.use('/api', healthRoutes);           // /api/health, /api/db-check
 app.use('/api/auth', authRoutes);        // /api/auth/login, /api/auth/me
 app.use('/api/branches', branchesRoutes);// /api/branches
 app.use('/api/purchases', purchasesRoutes); // /api/purchases, /api/purchases/summary...
+app.use('/api/documents', documentsRoutes); // /api/documents (файлы служебок)
 
 // 404
 app.use((req, res) => {
