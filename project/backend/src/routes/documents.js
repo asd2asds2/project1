@@ -92,7 +92,7 @@ router.post(
     try {
       const result = await pool.query(
         `INSERT INTO documents
-           (entity_type, entity_id, file_name, file_path, file_size, description, uploaded_by, uploaded_at)
+           (entity_type, entity_id, file_name, stored_name, file_size, description, uploaded_by, uploaded_at)
          VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
          RETURNING id, entity_type, entity_id, file_name, file_size, description, uploaded_at`,
         [
@@ -127,7 +127,7 @@ router.post(
 router.get('/:id/download', async (req, res) => {
   try {
     const result = await pool.query(
-      'SELECT file_name, file_path FROM documents WHERE id = $1',
+      'SELECT file_name, stored_name FROM documents WHERE id = $1',
       [req.params.id]
     );
     const doc = result.rows[0];
@@ -136,7 +136,7 @@ router.get('/:id/download', async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'Файл не найден' });
     }
 
-    const filePath = path.join(UPLOAD_DIR, doc.file_path);
+    const filePath = path.join(UPLOAD_DIR, doc.stored_name);
 
     if (!fs.existsSync(filePath)) {
       return res.status(404).json({ status: 'error', message: 'Файл отсутствует на диске' });
@@ -155,7 +155,7 @@ router.get('/:id/download', async (req, res) => {
 router.delete('/:id', requireRole('admin', 'financier'), async (req, res) => {
   try {
     const result = await pool.query(
-      'DELETE FROM documents WHERE id = $1 RETURNING file_path',
+      'DELETE FROM documents WHERE id = $1 RETURNING stored_name',
       [req.params.id]
     );
     const doc = result.rows[0];
@@ -164,7 +164,7 @@ router.delete('/:id', requireRole('admin', 'financier'), async (req, res) => {
       return res.status(404).json({ status: 'error', message: 'Файл не найден' });
     }
 
-    fs.unlink(path.join(UPLOAD_DIR, doc.file_path), () => {});
+    fs.unlink(path.join(UPLOAD_DIR, doc.stored_name), () => {});
 
     res.json({ status: 'ok' });
   } catch (err) {
