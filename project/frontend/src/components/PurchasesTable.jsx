@@ -44,7 +44,14 @@ function centerAmountOf(p) {
   return isCenterName(p.branch_name) ? Number(p.amount || 0) : 0;
 }
 
-function rowStyle(p) {
+// quarterColor передаётся только на годовом плане (showQuarterColumn=true) —
+// там в одной таблице вперемешку строки разных кварталов, и всю строку
+// подсвечиваем цветом её квартала (не точкой, а именно заливкой строки
+// целиком + толстой цветной полосой слева), чтобы кварталы визуально
+// не путались. На странице одного квартала подсветка не нужна — там и так
+// все строки одного квартала. Отмена/внеплан/непросмотренное от филиала —
+// более важные статусы, они всегда перекрывают цвет квартала.
+function rowStyle(p, quarterColor) {
   if (p.status === "cancelled") {
     return { background: "var(--surface)", color: "var(--cancelled-text)", textDecoration: "line-through" };
   }
@@ -53,6 +60,11 @@ function rowStyle(p) {
   }
   if (p.source === "branch" && !p.reviewed_at) {
     return { background: "var(--highlight-new-bg)", borderLeft: "3px solid var(--highlight-new-border)" };
+  }
+  if (quarterColor) {
+    // "1f" в конце hex — это ~12% непрозрачности, чтобы текст в строке
+    // оставался читаемым и в светлой, и в тёмной теме.
+    return { background: `${quarterColor}1f`, borderLeft: `4px solid ${quarterColor}` };
   }
   return {};
 }
@@ -454,7 +466,7 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                   key={p.id}
                   className="purchase-row"
                   style={{
-                    ...rowStyle(p),
+                    ...rowStyle(p, showQuarterColumn ? QUARTER_COLORS[p.quarter] : null),
                     opacity: isDragging ? 0.4 : 1,
                     boxShadow: isDropTarget ? "inset 0 2px 0 var(--accent)" : "none",
                     cursor: "context-menu",
