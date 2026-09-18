@@ -2,7 +2,9 @@ import { useEffect, useMemo, useState, useCallback } from "react";
 import { apiFetch } from "../api";
 import { useAuth } from "../context/AuthContext";
 import DocumentsModal from "./DocumentsModal";
+import NotesModal from "./NotesModal";
 import ImportExcelModal from "./ImportExcelModal";
+import ContextMenu from "./ContextMenu";
 
 const METHODS = ["ЕП", "ЭА", "ЗК", "Р", "Конкурс", "Другое"];
 const EMPTY_SHARE = { branch_id: "", amount: "" };
@@ -46,7 +48,17 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
   const [editing, setEditing] = useState(null); // id закупки, которую редактируем, или "new"
   const [form, setForm] = useState(EMPTY_FORM);
   const [filesFor, setFilesFor] = useState(null); // закупка, для которой открыта модалка файлов
+  const [notesFor, setNotesFor] = useState(null); // закупка, для которой открыта модалка заметок
   const [importing, setImporting] = useState(false);
+  const [menu, setMenu] = useState(null); // { x, y, purchase } — контекстное меню по ПКМ
+  const [dragId, setDragId] = useState(null);
+  const [overId, setOverId] = useState(null);
+
+  const effectiveSearch = search || localSearch;
+  // Порядок можно менять перетаскиванием только внутри одного конкретного
+  // квартала и без активного поиска/фильтра — иначе визуальный порядок строк
+  // не совпадает с реальным порядком в квартале, и перетаскивание запутает.
+  const canReorder = canEdit && !!quarter && !effectiveSearch && !pending;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -55,7 +67,6 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
       const params = new URLSearchParams({ year: String(year) });
       if (quarter) params.set("quarter", String(quarter));
       if (pending) params.set("pending", "1");
-      const effectiveSearch = search || localSearch;
       if (effectiveSearch) params.set("search", effectiveSearch);
 
       const [purchasesRes, branchesRes] = await Promise.all([
@@ -69,14 +80,21 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
     } finally {
       setLoading(false);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [year, quarter, search, pending, localSearch]);
 
   useEffect(() => { load(); }, [load]);
 
-  const total = useMemo(
-    () => items.filter((i) => i.status !== "cancelled").reduce((sum, i) => sum + Number(i.amount || 0), 0),
-    [items]
-  );
+  const stats = useMemo(() => {
+    const active = items.filter((i) => i.status !== "cancelled");
+    return {
+      total: active.reduce((sum, i) => sum + Number(i.amount || 0), 0),
+      count: active.length,
+      cancelled: items.filter((i) => i.status === "cancelled").length,
+      unplanned: items.filter((i) => i.status === "unplanned").length,
+      pendingReview: items.filter((i) => i.source === "branch" && !i.reviewed_at).length,
+    };
+  }, [items]);
 
   function startEdit(p) {
     setEditing(p.id);
@@ -167,6 +185,94 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
     }
   }
 
+  // --- Перетаскивание строк (drag-and-drop) ---------------------------------
+
+  async function persistOrder(newItems) {
+    try {
+      await apiFetch(`/api/purchases/reorder`, {
+        method: "PATCH",
+        body: JSON.stringify({ year, quarter, order: newItems.map((p) => p.id) }),
+      });
+    } catch (err) {
+      setError(err.message);
+      load();
+    }
+  }
+
+  function onRowDragStart(e, id) {
+    setDragId(id);
+    e.dataTransfer.effectAllowed = "move";
+    e.dataTransfer.setData("text/plain", String(id));
+  }
+
+  function onRowDragOver(e, id) {
+    if (dragId === null || dragId === id) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = "move";
+    if (overId !== id) setOverId(id);
+  }
+
+  function onRowDrop(e, id) {
+    e.preventDefault();
+    if (dragId === null || dragId === id) {
+      setDragId(null);
+      setOverId(null);
+      return;
+    }
+    setItems((prev) => {
+      const fromIdx = prev.findIndex((p) => p.id === dragId);
+      const toIdx = prev.findIndex((p) => p.id === id);
+      if (fromIdx === -1 || toIdx === -1) return prev;
+      const next = [...prev];
+      const [moved] = next.splice(fromIdx, 1);
+      next.splice(toIdx, 0, moved);
+      const renumbered = next.map((p, idx) => ({ ...p, item_no: idx + 1 }));
+      persistOrder(renumbered);
+      return renumbered;
+    });
+    setDragId(null);
+    setOverId(null);
+  }
+
+  function onRowDragEnd() {
+    setDragId(null);
+    setOverId(null);
+  }
+
+  // --- Контекстное меню (ПКМ) -----------------------------------------------
+
+  function openContextMenu(e, p) {
+    e.preventDefault();
+    setMenu({ x: e.clientX, y: e.clientY, purchase: p });
+  }
+
+  function contextMenuItems(p) {
+    const items = [];
+    if (canEdit) {
+      items.push({ label: "Изменить", icon: "✏️", onClick: () => startEdit(p) });
+    }
+    items.push({ label: "Файлы служебок", icon: "📎", onClick: () => setFilesFor(p) });
+    items.push({
+      label: p.notes_count > 0 ? `Заметки (${p.notes_count})` : "Заметки",
+      icon: "📝",
+      onClick: () => setNotesFor(p),
+    });
+    if (canReview && p.source === "branch" && !p.reviewed_at) {
+      items.push({ divider: true });
+      items.push({ label: "Отметить просмотренным", icon: "✓", onClick: () => review(p.id) });
+    }
+    if (canReview && p.status === "plan") {
+      items.push({ divider: true });
+      items.push({ label: "Перенести в другой квартал", icon: "↷", onClick: () => transfer(p.id) });
+      items.push({ label: "Отменить закупку", icon: "⊘", danger: true, onClick: () => cancelItem(p.id) });
+    }
+    if (canReview && p.status === "cancelled") {
+      items.push({ divider: true });
+      items.push({ label: "Удалить безвозвратно", icon: "🗑", danger: true, onClick: () => deleteItem(p) });
+    }
+    return items;
+  }
+
   return (
     <div>
       <div style={styles.header}>
@@ -181,12 +287,12 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
             />
           )}
           {canImport && (
-            <button type="button" onClick={() => setImporting(true)} style={styles.secondaryButton}>
+            <button type="button" onClick={() => setImporting(true)} style={styles.secondaryButton} className="secondary-btn">
               Импорт из Excel
             </button>
           )}
           {canEdit && (
-            <button type="button" onClick={startNew} style={styles.primaryButton}>
+            <button type="button" onClick={startNew} style={styles.primaryButton} className="primary-btn">
               + Добавить закупку
             </button>
           )}
@@ -199,12 +305,15 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
         <span><i style={{ ...styles.dot, background: "var(--highlight-new-border)" }} /> новое от филиала — не просмотрено</span>
         <span><i style={{ ...styles.dot, background: "var(--unplanned-border)" }} /> внеплановая закупка</span>
         <span><i style={{ ...styles.dot, background: "var(--cancelled-text)" }} /> отменено</span>
+        {canReorder && <span style={styles.legendHint}>⋮⋮ — перетащите, чтобы изменить порядок · ПКМ по строке — быстрые действия</span>}
+        {!canReorder && <span style={styles.legendHint}>ПКМ по строке — быстрые действия</span>}
       </div>
 
       <div style={styles.tableWrap}>
         <table>
           <thead>
             <tr>
+              {canReorder && <th style={{ ...styles.th, width: 28 }}></th>}
               <th style={styles.th}>№</th>
               {showQuarterColumn && <th style={styles.th}>Кв.</th>}
               <th style={styles.th}>Наименование закупки</th>
@@ -220,64 +329,152 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={11} style={styles.emptyCell}>Загрузка…</td></tr>
+              <tr><td colSpan={12} style={styles.emptyCell}>Загрузка…</td></tr>
             )}
             {!loading && items.length === 0 && (
-              <tr><td colSpan={11} style={styles.emptyCell}>Пока нет закупок</td></tr>
+              <tr><td colSpan={12} style={styles.emptyCell}>Пока нет закупок</td></tr>
             )}
-            {!loading && items.map((p) => (
-              <tr key={p.id} style={rowStyle(p)}>
-                <td style={styles.td}>{p.item_no ?? "—"}</td>
-                {showQuarterColumn && <td style={styles.td}>{p.quarter}</td>}
-                <td style={styles.td}>{p.name}</td>
-                <td style={styles.td}>{p.product_group || "—"}</td>
-                <td style={styles.td}>{p.method || "—"}</td>
-                <td style={{ ...styles.td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtMoney(p.amount)}</td>
-                <td style={styles.td}>
-                  {p.shares && p.shares.length > 1 ? (
-                    <div>
-                      <div>{p.shares.length} филиала(ов)</div>
-                      <div style={styles.sharesBreakdown}>
-                        {p.shares.map((s) => `${s.branch_name}: ${fmtMoney(s.amount)}`).join("; ")}
+            {!loading && items.map((p) => {
+              const isDragging = dragId === p.id;
+              const isDropTarget = overId === p.id && dragId !== null && dragId !== p.id;
+              return (
+                <tr
+                  key={p.id}
+                  className="purchase-row"
+                  style={{
+                    ...rowStyle(p),
+                    opacity: isDragging ? 0.4 : 1,
+                    boxShadow: isDropTarget ? "inset 0 2px 0 var(--accent)" : "none",
+                    cursor: "context-menu",
+                  }}
+                  draggable={canReorder}
+                  onDragStart={canReorder ? (e) => onRowDragStart(e, p.id) : undefined}
+                  onDragOver={canReorder ? (e) => onRowDragOver(e, p.id) : undefined}
+                  onDrop={canReorder ? (e) => onRowDrop(e, p.id) : undefined}
+                  onDragEnd={canReorder ? onRowDragEnd : undefined}
+                  onContextMenu={(e) => openContextMenu(e, p)}
+                >
+                  {canReorder && (
+                    <td style={{ ...styles.td, ...styles.dragHandleCell }} title="Перетащите, чтобы изменить порядок">
+                      <span style={styles.dragHandle} className="drag-handle">⋮⋮</span>
+                    </td>
+                  )}
+                  <td style={styles.td}>{p.item_no ?? "—"}</td>
+                  {showQuarterColumn && <td style={styles.td}>{p.quarter}</td>}
+                  <td style={styles.td}>
+                    {p.name}
+                    {Number(p.notes_count) > 0 && (
+                      <span style={styles.notesBadge} title={`Заметок: ${p.notes_count}`}>📝 {p.notes_count}</span>
+                    )}
+                  </td>
+                  <td style={styles.td}>{p.product_group || "—"}</td>
+                  <td style={styles.td}>{p.method || "—"}</td>
+                  <td style={{ ...styles.td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtMoney(p.amount)}</td>
+                  <td style={styles.td}>
+                    {p.shares && p.shares.length > 1 ? (
+                      <div>
+                        <div>{p.shares.length} филиала(ов)</div>
+                        <div style={styles.sharesBreakdown}>
+                          {p.shares.map((s) => `${s.branch_name}: ${fmtMoney(s.amount)}`).join("; ")}
+                        </div>
                       </div>
+                    ) : (
+                      p.branch_name || "—"
+                    )}
+                  </td>
+                  <td style={styles.td}>{p.deadline || "—"}</td>
+                  <td style={styles.td}>{p.okpd2 || "—"}</td>
+                  <td style={styles.td}>{statusLabel(p.status)}</td>
+                  <td style={{ ...styles.td, whiteSpace: "nowrap" }}>
+                    <div style={styles.actionsRow}>
+                      {canEdit && (
+                        <button type="button" onClick={() => startEdit(p)} style={styles.iconButton} className="icon-btn" title="Изменить">
+                          ✏️
+                        </button>
+                      )}
+                      <button type="button" onClick={() => setFilesFor(p)} style={styles.iconButton} className="icon-btn" title="Файлы служебок">
+                        📎
+                      </button>
+                      <button type="button" onClick={() => setNotesFor(p)} style={styles.iconButton} className="icon-btn" title="Заметки">
+                        📝
+                      </button>
+                      {canReview && p.source === "branch" && !p.reviewed_at && (
+                        <button type="button" onClick={() => review(p.id)} style={styles.iconButton} className="icon-btn" title="Отметить просмотренным">
+                          ✓
+                        </button>
+                      )}
+                      {canReview && p.status === "plan" && (
+                        <>
+                          <button type="button" onClick={() => transfer(p.id)} style={styles.iconButton} className="icon-btn" title="Перенести в другой квартал">
+                            ↷
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => cancelItem(p.id)}
+                            style={{ ...styles.iconButton, color: "var(--danger)" }} className="icon-btn"
+                            title="Отменить закупку"
+                          >
+                            ⊘
+                          </button>
+                        </>
+                      )}
+                      {canReview && p.status === "cancelled" && (
+                        <button
+                          type="button"
+                          onClick={() => deleteItem(p)}
+                          style={{ ...styles.iconButton, color: "var(--danger)" }} className="icon-btn"
+                          title="Удалить безвозвратно"
+                        >
+                          🗑
+                        </button>
+                      )}
+                      <button
+                        type="button"
+                        onClick={(e) => openContextMenu(e, p)}
+                        style={styles.iconButton} className="icon-btn"
+                        title="Ещё действия"
+                      >
+                        ⋯
+                      </button>
                     </div>
-                  ) : (
-                    p.branch_name || "—"
-                  )}
-                </td>
-                <td style={styles.td}>{p.deadline || "—"}</td>
-                <td style={styles.td}>{p.okpd2 || "—"}</td>
-                <td style={styles.td}>{statusLabel(p.status)}</td>
-                <td style={{ ...styles.td, whiteSpace: "nowrap" }}>
-                  {canEdit && <button type="button" onClick={() => startEdit(p)} style={styles.linkButton}>изм.</button>}
-                  <button type="button" onClick={() => setFilesFor(p)} style={styles.linkButton}>📎 файлы</button>
-                  {canReview && p.source === "branch" && !p.reviewed_at && (
-                    <button type="button" onClick={() => review(p.id)} style={styles.linkButton}>✓ просмотрено</button>
-                  )}
-                  {canReview && p.status === "plan" && (
-                    <>
-                      <button type="button" onClick={() => transfer(p.id)} style={styles.linkButton}>перенос</button>
-                      <button type="button" onClick={() => cancelItem(p.id)} style={{ ...styles.linkButton, color: "var(--danger)" }}>отменить</button>
-                    </>
-                  )}
-                  {canReview && p.status === "cancelled" && (
-                    <button type="button" onClick={() => deleteItem(p)} style={{ ...styles.linkButton, color: "var(--danger)" }}>удалить</button>
-                  )}
-                </td>
-              </tr>
-            ))}
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
-          {!loading && items.length > 0 && (
-            <tfoot>
-              <tr>
-                <td colSpan={showQuarterColumn ? 5 : 4} style={styles.totalLabel}>Итого:</td>
-                <td style={{ ...styles.totalValue, textAlign: "right" }}>{fmtMoney(total)}</td>
-                <td colSpan={5}></td>
-              </tr>
-            </tfoot>
-          )}
         </table>
       </div>
+
+      {!loading && items.length > 0 && (
+        <div style={styles.statsBar}>
+          <div style={styles.statCard}>
+            <div style={styles.statLabel}>Итого по странице</div>
+            <div style={styles.statValue}>{fmtMoney(stats.total)} ₽</div>
+          </div>
+          <div style={styles.statCard}>
+            <div style={styles.statLabel}>Активных закупок</div>
+            <div style={styles.statValue}>{stats.count}</div>
+          </div>
+          {stats.pendingReview > 0 && (
+            <div style={{ ...styles.statCard, borderColor: "var(--highlight-new-border)" }}>
+              <div style={styles.statLabel}>Не просмотрено</div>
+              <div style={{ ...styles.statValue, color: "var(--warning)" }}>{stats.pendingReview}</div>
+            </div>
+          )}
+          {stats.unplanned > 0 && (
+            <div style={{ ...styles.statCard, borderColor: "var(--unplanned-border)" }}>
+              <div style={styles.statLabel}>Внеплановых</div>
+              <div style={{ ...styles.statValue, color: "var(--danger)" }}>{stats.unplanned}</div>
+            </div>
+          )}
+          {stats.cancelled > 0 && (
+            <div style={styles.statCard}>
+              <div style={styles.statLabel}>Отменено</div>
+              <div style={{ ...styles.statValue, color: "var(--text-muted)" }}>{stats.cancelled}</div>
+            </div>
+          )}
+        </div>
+      )}
 
       {editing && (
         <EditModal
@@ -299,12 +496,29 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
         />
       )}
 
+      {notesFor && (
+        <NotesModal
+          purchase={notesFor}
+          onClose={() => setNotesFor(null)}
+          onChanged={load}
+        />
+      )}
+
       {importing && (
         <ImportExcelModal
           year={year}
           defaultQuarter={quarter}
           onClose={() => setImporting(false)}
           onImported={load}
+        />
+      )}
+
+      {menu && (
+        <ContextMenu
+          x={menu.x}
+          y={menu.y}
+          items={contextMenuItems(menu.purchase)}
+          onClose={() => setMenu(null)}
         />
       )}
     </div>
@@ -440,8 +654,8 @@ function EditModal({ form, setForm, branches, isNew, onCancel, onSave }) {
         </div>
 
         <div style={styles.modalActions}>
-          <button type="button" onClick={onCancel} style={styles.secondaryButton}>Отмена</button>
-          <button type="button" onClick={onSave} style={styles.primaryButton}>Сохранить</button>
+          <button type="button" onClick={onCancel} style={styles.secondaryButton} className="secondary-btn">Отмена</button>
+          <button type="button" onClick={onSave} style={styles.primaryButton} className="primary-btn">Сохранить</button>
         </div>
       </div>
     </div>
@@ -452,18 +666,42 @@ const styles = {
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 10 },
   title: { margin: 0, fontSize: 20, color: "var(--text)" },
   filterInput: { padding: "7px 10px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", width: 220 },
-  primaryButton: { background: "var(--accent)", color: "var(--accent-contrast)", border: "none", borderRadius: "var(--radius-sm)", padding: "8px 14px", cursor: "pointer", fontWeight: 600 },
+  primaryButton: { background: "var(--accent)", color: "var(--accent-contrast)", border: "none", borderRadius: "var(--radius-sm)", padding: "8px 14px", cursor: "pointer", fontWeight: 600, transition: "filter 0.15s" },
   secondaryButton: { background: "var(--surface-2)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "8px 14px", cursor: "pointer" },
   errorBox: { background: "var(--danger-soft)", color: "var(--danger)", padding: "10px 14px", borderRadius: "var(--radius-sm)", marginBottom: 12 },
-  legend: { display: "flex", gap: 18, fontSize: 12, color: "var(--text-secondary)", marginBottom: 10, flexWrap: "wrap" },
+  legend: { display: "flex", gap: 18, fontSize: 12, color: "var(--text-secondary)", marginBottom: 10, flexWrap: "wrap", alignItems: "center" },
+  legendHint: { marginLeft: "auto", fontStyle: "italic", color: "var(--text-muted)" },
   dot: { display: "inline-block", width: 9, height: 9, borderRadius: "50%", marginRight: 5 },
   tableWrap: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "auto", boxShadow: "var(--shadow-sm)" },
   th: { textAlign: "left", padding: "10px 12px", borderBottom: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: 12, textTransform: "uppercase", letterSpacing: 0.3, whiteSpace: "nowrap" },
   td: { padding: "9px 12px", borderBottom: "1px solid var(--border)", fontSize: 13.5, color: "var(--text)" },
+  dragHandleCell: { padding: "9px 4px", textAlign: "center" },
+  dragHandle: { cursor: "grab", color: "var(--text-muted)", fontSize: 14, userSelect: "none", display: "inline-block", lineHeight: 1 },
   sharesBreakdown: { fontSize: 11, color: "var(--text-secondary)", marginTop: 2 },
+  notesBadge: { marginLeft: 8, fontSize: 11, color: "var(--text-secondary)", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, padding: "1px 7px", whiteSpace: "nowrap" },
   emptyCell: { padding: 24, textAlign: "center", color: "var(--text-muted)" },
-  totalLabel: { padding: "10px 12px", fontWeight: 700, textAlign: "right", color: "var(--text)" },
-  totalValue: { padding: "10px 12px", fontWeight: 700, color: "var(--text)", fontVariantNumeric: "tabular-nums" },
+  actionsRow: { display: "flex", gap: 2, alignItems: "center" },
+  iconButton: {
+    border: "none",
+    background: "none",
+    color: "var(--text-secondary)",
+    cursor: "pointer",
+    fontSize: 13,
+    padding: "5px 6px",
+    borderRadius: "var(--radius-sm)",
+    lineHeight: 1,
+  },
+  statsBar: { display: "flex", gap: 12, marginTop: 14, flexWrap: "wrap" },
+  statCard: {
+    background: "var(--surface)",
+    border: "1px solid var(--border)",
+    borderRadius: "var(--radius-sm)",
+    padding: "10px 16px",
+    minWidth: 140,
+    boxShadow: "var(--shadow-sm)",
+  },
+  statLabel: { fontSize: 11, color: "var(--text-secondary)", textTransform: "uppercase", letterSpacing: 0.3 },
+  statValue: { fontSize: 18, fontWeight: 700, color: "var(--text)", marginTop: 3, fontVariantNumeric: "tabular-nums" },
   linkButton: { border: "none", background: "none", color: "var(--accent)", cursor: "pointer", fontSize: 12.5, marginRight: 10, padding: 0 },
   modalOverlay: { position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 50 },
   modal: { background: "var(--surface)", borderRadius: "var(--radius)", padding: 24, width: 640, maxWidth: "92vw", maxHeight: "88vh", overflow: "auto", boxShadow: "var(--shadow-md)", color: "var(--text)" },

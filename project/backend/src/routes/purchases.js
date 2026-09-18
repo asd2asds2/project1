@@ -119,11 +119,15 @@ router.get('/', async (req, res) => {
                  WHERE s.purchase_id = p.id),
                 '[]'
               ) AS shares,
-              ROW_NUMBER() OVER (PARTITION BY p.quarter ORDER BY p.created_at) AS item_no
+              (SELECT COUNT(*) FROM purchase_notes n WHERE n.purchase_id = p.id) AS notes_count,
+              ROW_NUMBER() OVER (
+                PARTITION BY p.quarter
+                ORDER BY COALESCE(p.sort_order, 2147483647), p.created_at
+              ) AS item_no
        FROM purchases p
        LEFT JOIN branches b ON b.id = p.branch_id
        WHERE ${conditions.join(' AND ')}
-       ORDER BY p.quarter, p.created_at`,
+       ORDER BY p.quarter, COALESCE(p.sort_order, 2147483647), p.created_at`,
       values
     );
 
@@ -137,6 +141,107 @@ router.get('/', async (req, res) => {
     });
 
     res.json({ status: 'ok', purchases });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Сохранение ручного порядка закупок внутри квартала (перетаскивание в UI).
+// Тело: { year, quarter, order: [id1, id2, ...] } — порядок в массиве = новый
+// порядок строк. Затрагивает только закупки, реально принадлежащие этому
+// year/quarter (защита от подмены чужих id).
+// ---------------------------------------------------------------------------
+router.patch('/reorder', requireRole('admin', 'financier', 'branch_editor'), async (req, res) => {
+  const { year, quarter, order } = req.body;
+
+  if (!year || !quarter || !Array.isArray(order) || order.length === 0) {
+    return res.status(400).json({ status: 'error', message: 'Некорректные данные для сохранения порядка' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (let i = 0; i < order.length; i++) {
+      await client.query(
+        `UPDATE purchases SET sort_order = $1 WHERE id = $2 AND year = $3 AND quarter = $4`,
+        [i + 1, Number(order[i]), Number(year), Number(quarter)]
+      );
+    }
+    await client.query('COMMIT');
+    res.json({ status: 'ok' });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  } finally {
+    client.release();
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Заметки по закупке — свободный текстовый лог, отдельный от служебного
+// "Примечания" в самой карточке (то поле — часть плана, а это — обсуждение/
+// история по ходу работы, доступно всем, кто видит закупку).
+// ---------------------------------------------------------------------------
+router.get('/:id/notes', async (req, res) => {
+  try {
+    const result = await pool.query(
+      `SELECT n.id, n.purchase_id, n.text, n.created_at, n.author_id, u.full_name AS author_name
+       FROM purchase_notes n
+       LEFT JOIN users u ON u.id = n.author_id
+       WHERE n.purchase_id = $1
+       ORDER BY n.created_at DESC`,
+      [req.params.id]
+    );
+    res.json({ status: 'ok', notes: result.rows });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+router.post('/:id/notes', requireRole('admin', 'financier', 'branch_editor'), async (req, res) => {
+  const { text } = req.body;
+
+  if (!text || !String(text).trim()) {
+    return res.status(400).json({ status: 'error', message: 'Введите текст заметки' });
+  }
+
+  try {
+    const result = await pool.query(
+      `INSERT INTO purchase_notes (purchase_id, author_id, text)
+       VALUES ($1, $2, $3)
+       RETURNING id, purchase_id, text, created_at, author_id`,
+      [req.params.id, req.user.userId, String(text).trim()]
+    );
+    const userRow = await pool.query('SELECT full_name FROM users WHERE id = $1', [req.user.userId]);
+    res.json({
+      status: 'ok',
+      note: { ...result.rows[0], author_name: userRow.rows[0]?.full_name || null },
+    });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+router.delete('/:id/notes/:noteId', async (req, res) => {
+  try {
+    const check = await pool.query('SELECT author_id FROM purchase_notes WHERE id = $1', [req.params.noteId]);
+    if (!check.rows[0]) {
+      return res.status(404).json({ status: 'error', message: 'Заметка не найдена' });
+    }
+
+    const isOwner = check.rows[0].author_id === req.user.userId;
+    const isPrivileged = req.user.role === 'admin' || req.user.role === 'financier';
+    if (!isOwner && !isPrivileged) {
+      return res.status(403).json({ status: 'error', message: 'Можно удалять только свои заметки' });
+    }
+
+    await pool.query('DELETE FROM purchase_notes WHERE id = $1', [req.params.noteId]);
+    res.json({ status: 'ok' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
@@ -540,7 +645,8 @@ async function fetchPurchaseWithShares(id) {
                JOIN branches bb ON bb.id = s.branch_id
                WHERE s.purchase_id = p.id),
               '[]'
-            ) AS shares
+            ) AS shares,
+            (SELECT COUNT(*) FROM purchase_notes n WHERE n.purchase_id = p.id) AS notes_count
      FROM purchases p
      LEFT JOIN branches b ON b.id = p.branch_id
      WHERE p.id = $1`,

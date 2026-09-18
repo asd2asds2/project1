@@ -95,3 +95,12 @@ table { border-collapse: collapse; width: 100%; }
 
 ::-webkit-scrollbar { width: 10px; height: 10px; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 6px; }
+
+/* Таблица закупок: аккуратные иконки-кнопки, ручка перетаскивания, ховер строк */
+.icon-btn { transition: background 0.12s ease, opacity 0.12s ease; }
+.icon-btn:hover:not(:disabled) { background: var(--surface-2) !important; }
+.drag-handle:active { cursor: grabbing !important; }
+.purchase-row:hover td { filter: brightness(0.98); }
+.purchase-row[draggable="true"]:hover .drag-handle { color: var(--text-secondary); }
+.primary-btn:hover { filter: brightness(1.08); }
+.secondary-btn:hover { background: var(--border) !important; }
