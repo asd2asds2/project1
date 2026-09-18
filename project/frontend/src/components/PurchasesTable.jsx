@@ -78,6 +78,29 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
   const [menu, setMenu] = useState(null); // { x, y, purchase } — контекстное меню по ПКМ
   const [dragId, setDragId] = useState(null);
   const [overId, setOverId] = useState(null);
+  // Часть колонок (второстепенные, редко нужные) по умолчанию скрыта,
+  // чтобы таблица помещалась по ширине без горизонтального скролла целиком
+  // экрана. Кнопка "Показать все колонки" раскрывает их обратно.
+  // Выбор запоминается в localStorage — одинаковый для всех страниц с таблицей.
+  const [wideColumns, setWideColumns] = useState(() => {
+    try {
+      return localStorage.getItem("purchasesTable.wideColumns") === "1";
+    } catch {
+      return false;
+    }
+  });
+
+  function toggleWideColumns() {
+    setWideColumns((prev) => {
+      const next = !prev;
+      try {
+        localStorage.setItem("purchasesTable.wideColumns", next ? "1" : "0");
+      } catch {
+        // localStorage недоступен (приватный режим и т.п.) — просто не сохраняем выбор
+      }
+      return next;
+    });
+  }
 
   const effectiveSearch = search || localSearch;
   // Порядок можно менять перетаскиванием только внутри одного конкретного
@@ -325,6 +348,11 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
     return items;
   }
 
+  // Для colSpan строк "Загрузка…" / "Пока нет закупок" — считаем реально
+  // отображаемые колонки: 7 всегда видимых (№, Наименование, НМЦ,
+  // Потребители, ОКПД2, Статус, действия) + опциональные.
+  const columnCount = 7 + (canReorder ? 1 : 0) + (showQuarterColumn ? 1 : 0) + (wideColumns ? 6 : 0);
+
   return (
     <div>
       <div style={styles.header}>
@@ -338,6 +366,9 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
               style={styles.filterInput}
             />
           )}
+          <button type="button" onClick={toggleWideColumns} style={styles.secondaryButton} className="secondary-btn">
+            {wideColumns ? "Скрыть доп. колонки" : "Показать все колонки"}
+          </button>
           {canImport && (
             <button type="button" onClick={() => setImporting(true)} style={styles.secondaryButton} className="secondary-btn">
               Импорт из Excel
@@ -369,14 +400,14 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
               <th style={styles.th}>№ п/п</th>
               {showQuarterColumn && <th style={styles.th}>Кв.</th>}
               <th style={styles.th}>Наименование закупки (предмет договора)</th>
-              <th style={styles.th}>Группа продукции (АСГОР)</th>
-              <th style={styles.th}>Способ размещения закупки</th>
-              <th style={styles.th}>Обоснование закупки у ЕП</th>
-              <th style={styles.th}>Плановая дата подачи ТЗ/спецификации</th>
-              <th style={styles.th}>Плановая дата размещения извещения</th>
+              {wideColumns && <th style={styles.th}>Группа продукции (АСГОР)</th>}
+              {wideColumns && <th style={styles.th}>Способ размещения закупки</th>}
+              {wideColumns && <th style={styles.th}>Обоснование закупки у ЕП</th>}
+              {wideColumns && <th style={styles.th}>Плановая дата подачи ТЗ/спецификации</th>}
+              {wideColumns && <th style={styles.th}>Плановая дата размещения извещения</th>}
               <th style={styles.th}>НМЦ договора, руб.</th>
               <th style={styles.th}>Потребители</th>
-              <th style={styles.th}>Срок исполнения договора</th>
+              {wideColumns && <th style={styles.th}>Срок исполнения договора</th>}
               <th style={styles.th}>Код по ОКПД 2</th>
               <th style={styles.th}>Статус</th>
               <th style={styles.th}></th>
@@ -384,10 +415,10 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
           </thead>
           <tbody>
             {loading && (
-              <tr><td colSpan={15} style={styles.emptyCell}>Загрузка…</td></tr>
+              <tr><td colSpan={columnCount} style={styles.emptyCell}>Загрузка…</td></tr>
             )}
             {!loading && items.length === 0 && (
-              <tr><td colSpan={15} style={styles.emptyCell}>Пока нет закупок</td></tr>
+              <tr><td colSpan={columnCount} style={styles.emptyCell}>Пока нет закупок</td></tr>
             )}
             {!loading && items.map((p) => {
               const isDragging = dragId === p.id;
@@ -437,11 +468,11 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                       <span style={styles.notesBadge} title={`Файлов служебок: ${p.documents_count}`}>📎 {p.documents_count}</span>
                     )}
                   </td>
-                  <td style={styles.td}>{p.product_group || "—"}</td>
-                  <td style={styles.td}>{p.method || "—"}</td>
-                  <td style={styles.td}>{p.justification || "—"}</td>
-                  <td style={styles.td}>{p.tz_date ? p.tz_date.slice(0, 10) : "—"}</td>
-                  <td style={styles.td}>{p.notice_date ? p.notice_date.slice(0, 10) : "—"}</td>
+                  {wideColumns && <td style={styles.td}>{p.product_group || "—"}</td>}
+                  {wideColumns && <td style={styles.td}>{p.method || "—"}</td>}
+                  {wideColumns && <td style={styles.td}>{p.justification || "—"}</td>}
+                  {wideColumns && <td style={styles.td}>{p.tz_date ? p.tz_date.slice(0, 10) : "—"}</td>}
+                  {wideColumns && <td style={styles.td}>{p.notice_date ? p.notice_date.slice(0, 10) : "—"}</td>}
                   <td style={{ ...styles.td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtMoney(p.amount)}</td>
                   <td style={styles.td}>
                     {p.shares && p.shares.length > 1 ? (
@@ -455,7 +486,7 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                       p.branch_name || "—"
                     )}
                   </td>
-                  <td style={styles.td}>{p.deadline || "—"}</td>
+                  {wideColumns && <td style={styles.td}>{p.deadline || "—"}</td>}
                   <td style={styles.td}>{p.okpd2 || "—"}</td>
                   <td style={styles.td}>{statusLabel(p.status)}</td>
                   <td style={{ ...styles.td, whiteSpace: "nowrap" }}>
@@ -824,5 +855,3 @@ const styles = {
   sharesFooter: { display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 4, flexWrap: "wrap", gap: 8 },
   sharesTotal: { fontSize: 12.5, fontWeight: 600, color: "var(--text)" },
 };
-
-
