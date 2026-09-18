@@ -44,14 +44,17 @@ function centerAmountOf(p) {
   return isCenterName(p.branch_name) ? Number(p.amount || 0) : 0;
 }
 
-// quarterColor передаётся только на годовом плане (showQuarterColumn=true) —
-// там в одной таблице вперемешку строки разных кварталов, и всю строку
-// подсвечиваем цветом её квартала (не точкой, а именно заливкой строки
-// целиком + толстой цветной полосой слева), чтобы кварталы визуально
-// не путались. На странице одного квартала подсветка не нужна — там и так
-// все строки одного квартала. Отмена/внеплан/непросмотренное от филиала —
-// более важные статусы, они всегда перекрывают цвет квартала.
-function rowStyle(p, quarterColor) {
+// quarterColor — цветная полоса слева, только для годового плана
+// (showQuarterColumn=true), где в одной таблице вперемешку разные кварталы.
+// branchColor — заливка всей строки цветом филиала (тем самым, который
+// выбран/сохранён на странице «Филиалы»); показывается на ЛЮБОЙ странице
+// (годовой план, квартал, поиск), а не только на годовом плане — так закупки
+// одного филиала визуально выделяются везде. Работает для закупок с одним
+// филиалом; если закупка разбита на несколько филиалов — заливки нет (нет
+// одного "своего" цвета), но полоса квартала на годовом плане всё равно
+// показывается. Отмена/внеплан/непросмотренное от филиала — более важные
+// статусы, они всегда перекрывают и цвет филиала, и цвет квартала.
+function rowStyle(p, quarterColor, branchColor) {
   if (p.status === "cancelled") {
     return { background: "var(--surface)", color: "var(--cancelled-text)", textDecoration: "line-through" };
   }
@@ -61,12 +64,28 @@ function rowStyle(p, quarterColor) {
   if (p.source === "branch" && !p.reviewed_at) {
     return { background: "var(--highlight-new-bg)", borderLeft: "3px solid var(--highlight-new-border)" };
   }
+  if (branchColor) {
+    // "26" в конце hex — это ~15% непрозрачности (заметнее, чем у квартала,
+    // это основная заливка строки), чтобы текст оставался читаемым.
+    return {
+      background: `${branchColor}26`,
+      borderLeft: `4px solid ${quarterColor || branchColor}`,
+    };
+  }
   if (quarterColor) {
-    // "1f" в конце hex — это ~12% непрозрачности, чтобы текст в строке
-    // оставался читаемым и в светлой, и в тёмной теме.
+    // "1f" в конце hex — это ~12% непрозрачности.
     return { background: `${quarterColor}1f`, borderLeft: `4px solid ${quarterColor}` };
   }
   return {};
+}
+
+// Цвет филиала для заливки строки (см. rowStyle выше). Есть только тогда,
+// когда у закупки ровно один филиал — свой ли (branch_id) или единственная
+// доля в shares. При нескольких филиалах у закупки нет одного "своего" цвета.
+function branchColorForRow(p, branches) {
+  if (p.shares && p.shares.length === 1) return colorForBranchId(branches, p.shares[0].branch_id);
+  if ((!p.shares || p.shares.length === 0) && p.branch_id) return colorForBranchId(branches, p.branch_id);
+  return null;
 }
 
 // year=2026 фикс (можно вынести в проп, если понадобятся другие годы)
@@ -426,6 +445,8 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
         <span><i style={{ ...styles.dot, background: "var(--highlight-new-border)" }} /> новое от филиала — не просмотрено</span>
         <span><i style={{ ...styles.dot, background: "var(--unplanned-border)" }} /> внеплановая закупка</span>
         <span><i style={{ ...styles.dot, background: "var(--cancelled-text)" }} /> отменено</span>
+        <span>заливка строки — цвет филиала (свой у каждого, меняется на странице «Филиалы»)</span>
+        {showQuarterColumn && <span>полоса слева — цвет квартала</span>}
         {canReorder && <span style={styles.legendHint}>⋮⋮ — перетащите, чтобы изменить порядок · ПКМ по строке — быстрые действия</span>}
         {!canReorder && <span style={styles.legendHint}>ПКМ по строке — быстрые действия</span>}
       </div>
@@ -466,7 +487,7 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                   key={p.id}
                   className="purchase-row"
                   style={{
-                    ...rowStyle(p, showQuarterColumn ? QUARTER_COLORS[p.quarter] : null),
+                    ...rowStyle(p, showQuarterColumn ? QUARTER_COLORS[p.quarter] : null, branchColorForRow(p, branches)),
                     opacity: isDragging ? 0.4 : 1,
                     boxShadow: isDropTarget ? "inset 0 2px 0 var(--accent)" : "none",
                     cursor: "context-menu",
