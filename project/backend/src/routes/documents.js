@@ -84,6 +84,11 @@ router.post(
       return res.status(400).json({ status: 'error', message: 'Файл не передан' });
     }
 
+    // multer/busboy отдают originalname декодированным как latin1, хотя
+    // браузер шлёт его в UTF-8 — из-за этого русские имена файлов превращаются
+    // в кракозябры. Перекодируем обратно.
+    const originalName = Buffer.from(req.file.originalname, 'latin1').toString('utf8');
+
     if (!entityType || !ALLOWED_ENTITY_TYPES.includes(entityType) || !entityId) {
       fs.unlink(req.file.path, () => {});
       return res.status(400).json({ status: 'error', message: 'Не указаны entity_type/entity_id' });
@@ -98,7 +103,7 @@ router.post(
         [
           entityType,
           Number(entityId),
-          req.file.originalname,
+          originalName,
           req.file.filename,
           req.file.size,
           description || null,

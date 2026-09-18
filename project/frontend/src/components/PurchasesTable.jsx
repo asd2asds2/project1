@@ -2,7 +2,6 @@ import { useEffect, useMemo, useState, useCallback } from "react";
 import { apiFetch } from "../api";
 import { useAuth } from "../context/AuthContext";
 import DocumentsModal from "./DocumentsModal";
-import NotesModal from "./NotesModal";
 import ImportExcelModal from "./ImportExcelModal";
 import ContextMenu from "./ContextMenu";
 import { colorForBranchId } from "../theme/branchPalette";
@@ -109,7 +108,6 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
   const [editing, setEditing] = useState(null); // id закупки, которую редактируем, или "new"
   const [form, setForm] = useState(EMPTY_FORM);
   const [filesFor, setFilesFor] = useState(null); // закупка, для которой открыта модалка файлов
-  const [notesFor, setNotesFor] = useState(null); // закупка, для которой открыта модалка заметок
   const [importing, setImporting] = useState(false);
   const [menu, setMenu] = useState(null); // { x, y, purchase } — контекстное меню по ПКМ
   const [dragId, setDragId] = useState(null);
@@ -170,6 +168,14 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
   }, [year, quarter, search, pending, localSearch]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Обновляем список после переноса закупки на филиал перетаскиванием в
+  // боковое меню (событие шлёт Layout.jsx после успешного PATCH).
+  useEffect(() => {
+    function onChanged() { load(); }
+    window.addEventListener("purchases:changed", onChanged);
+    return () => window.removeEventListener("purchases:changed", onChanged);
+  }, [load]);
 
   const stats = useMemo(() => {
     const active = items.filter((i) => i.status !== "cancelled");
@@ -334,6 +340,10 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
     setDragId(id);
     e.dataTransfer.effectAllowed = "move";
     e.dataTransfer.setData("text/plain", String(id));
+    // Отдельный MIME-тип для переноса закупки на филиал перетаскиванием в
+    // боковое меню (см. Layout.jsx) — не путать с обычным text/plain, который
+    // используется для переупорядочивания строк внутри этой же таблицы.
+    e.dataTransfer.setData("application/x-purchase-id", String(id));
   }
 
   function onRowDragOver(e, id) {
@@ -383,11 +393,6 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
       items.push({ label: "Изменить", icon: "✏️", onClick: () => startEdit(p) });
     }
     items.push({ label: "Файлы служебок", icon: "📎", onClick: () => setFilesFor(p) });
-    items.push({
-      label: p.notes_count > 0 ? `Заметки (${p.notes_count})` : "Заметки",
-      icon: "📝",
-      onClick: () => setNotesFor(p),
-    });
     if (canReview && p.source === "branch" && !p.reviewed_at) {
       items.push({ divider: true });
       items.push({ label: "Отметить просмотренным", icon: "✓", onClick: () => review(p.id) });
@@ -447,8 +452,15 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
         <span><i style={{ ...styles.dot, background: "var(--cancelled-text)" }} /> отменено</span>
         <span>заливка строки — цвет филиала (свой у каждого, меняется на странице «Филиалы»)</span>
         {showQuarterColumn && <span>полоса слева — цвет квартала</span>}
-        {canReorder && <span style={styles.legendHint}>⋮⋮ — перетащите, чтобы изменить порядок · ПКМ по строке — быстрые действия</span>}
-        {!canReorder && <span style={styles.legendHint}>ПКМ по строке — быстрые действия</span>}
+        {canReorder && (
+          <span style={styles.legendHint}>
+            ⋮⋮ — перетащите, чтобы изменить порядок · перетащите строку на филиал в боковом меню, чтобы перенести закупку · ПКМ по строке — быстрые действия
+          </span>
+        )}
+        {!canReorder && canEdit && (
+          <span style={styles.legendHint}>перетащите строку на филиал в боковом меню, чтобы перенести закупку · ПКМ по строке — быстрые действия</span>
+        )}
+        {!canReorder && !canEdit && <span style={styles.legendHint}>ПКМ по строке — быстрые действия</span>}
       </div>
 
       <div style={styles.tableWrap}>
@@ -492,11 +504,11 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                     boxShadow: isDropTarget ? "inset 0 2px 0 var(--accent)" : "none",
                     cursor: "context-menu",
                   }}
-                  draggable={canReorder}
-                  onDragStart={canReorder ? (e) => onRowDragStart(e, p.id) : undefined}
+                  draggable={canEdit}
+                  onDragStart={canEdit ? (e) => onRowDragStart(e, p.id) : undefined}
                   onDragOver={canReorder ? (e) => onRowDragOver(e, p.id) : undefined}
                   onDrop={canReorder ? (e) => onRowDrop(e, p.id) : undefined}
-                  onDragEnd={canReorder ? onRowDragEnd : undefined}
+                  onDragEnd={canEdit ? onRowDragEnd : undefined}
                   onContextMenu={(e) => openContextMenu(e, p)}
                 >
                   {canReorder && (
@@ -520,9 +532,6 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                   )}
                   <td style={styles.td}>
                     {p.name}
-                    {Number(p.notes_count) > 0 && (
-                      <span style={styles.notesBadge} title={`Заметок: ${p.notes_count}`}>📝 {p.notes_count}</span>
-                    )}
                     {Number(p.documents_count) > 0 && (
                       <span style={styles.notesBadge} title={`Файлов служебок: ${p.documents_count}`}>📎 {p.documents_count}</span>
                     )}
@@ -572,9 +581,6 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                       )}
                       <button type="button" onClick={() => setFilesFor(p)} style={styles.iconButton} className="icon-btn" title="Файлы служебок">
                         📎
-                      </button>
-                      <button type="button" onClick={() => setNotesFor(p)} style={styles.iconButton} className="icon-btn" title="Заметки">
-                        📝
                       </button>
                       {canReview && p.source === "branch" && !p.reviewed_at && (
                         <button type="button" onClick={() => review(p.id)} style={styles.iconButton} className="icon-btn" title="Отметить просмотренным">
@@ -728,14 +734,6 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
           entityId={filesFor.id}
           title={filesFor.name}
           onClose={() => setFilesFor(null)}
-          onChanged={load}
-        />
-      )}
-
-      {notesFor && (
-        <NotesModal
-          purchase={notesFor}
-          onClose={() => setNotesFor(null)}
           onChanged={load}
         />
       )}

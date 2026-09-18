@@ -189,6 +189,54 @@ router.patch('/reorder', requireRole('admin', 'financier', 'branch_editor'), asy
 });
 
 // ---------------------------------------------------------------------------
+// Перенос закупки на другой филиал перетаскиванием (drag & drop в боковом
+// меню). Тело: { branch_id }. Переводит закупку в режим одного филиала
+// (сбрасывает purchase_branch_shares, если закупка была разбита на доли).
+// ---------------------------------------------------------------------------
+router.patch('/:id/branch', requireRole('admin', 'financier', 'branch_editor'), async (req, res) => {
+  const { id } = req.params;
+  const branchId = Number(req.body.branch_id);
+
+  if (!branchId) {
+    return res.status(400).json({ status: 'error', message: 'Не указан филиал' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const branchCheck = await client.query('SELECT id FROM branches WHERE id = $1', [branchId]);
+    if (!branchCheck.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ status: 'error', message: 'Филиал не найден' });
+    }
+
+    await client.query('DELETE FROM purchase_branch_shares WHERE purchase_id = $1', [id]);
+
+    const updateResult = await client.query(
+      `UPDATE purchases SET branch_id = $1, updated_at = now() WHERE id = $2 RETURNING id`,
+      [branchId, id]
+    );
+
+    if (!updateResult.rows[0]) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
+    }
+
+    await client.query('COMMIT');
+
+    const full = await fetchPurchaseWithShares(id);
+    res.json({ status: 'ok', purchase: full });
+  } catch (err) {
+    await client.query('ROLLBACK');
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  } finally {
+    client.release();
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Заметки по закупке — свободный текстовый лог, отдельный от служебного
 // "Примечания" в самой карточке (то поле — часть плана, а это — обсуждение/
 // история по ходу работы, доступно всем, кто видит закупку).
