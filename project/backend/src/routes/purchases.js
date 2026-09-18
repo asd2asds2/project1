@@ -1,10 +1,16 @@
 const express = require('express');
+const fs = require('fs');
+const path = require('path');
 const multer = require('multer');
 const XLSX = require('xlsx');
 const pool = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
 
 const router = express.Router();
+
+// Тот же volume, что и у documents.js (см. docker-compose.yml, uploads_data:/app/uploads) —
+// нужен здесь, чтобы при полном удалении закупки подчистить и её файлы служебок с диска.
+const UPLOAD_DIR = process.env.UPLOAD_DIR || path.join(__dirname, '..', '..', 'uploads');
 
 // Файл для импорта нужен только на время разбора — в памяти, на диск не пишем.
 const memoryUpload = multer({
@@ -353,6 +359,47 @@ router.post('/:id/cancel', requireRole('admin', 'financier'), async (req, res) =
       return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
     }
     res.json({ status: 'ok', purchase: await fetchPurchaseWithShares(id) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+// ---------------------------------------------------------------------------
+// Полное удаление закупки — только если она уже отменена (status = 'cancelled').
+// Заодно удаляет её файлы служебок (и метаданные, и сами файлы с диска).
+// purchase_branch_shares / purchase_cancellations / purchase_transfers удалятся
+// автоматически через ON DELETE CASCADE.
+// ---------------------------------------------------------------------------
+router.delete('/:id', requireRole('admin', 'financier'), async (req, res) => {
+  const { id } = req.params;
+
+  try {
+    const check = await pool.query('SELECT status FROM purchases WHERE id = $1', [id]);
+
+    if (!check.rows[0]) {
+      return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
+    }
+    if (check.rows[0].status !== 'cancelled') {
+      return res.status(400).json({
+        status: 'error',
+        message: 'Удалить можно только отменённую закупку — сначала отмените её',
+      });
+    }
+
+    const docs = await pool.query(
+      `SELECT file_path FROM documents WHERE entity_type = 'purchase' AND entity_id = $1`,
+      [id]
+    );
+
+    await pool.query(`DELETE FROM documents WHERE entity_type = 'purchase' AND entity_id = $1`, [id]);
+    await pool.query('DELETE FROM purchases WHERE id = $1', [id]);
+
+    for (const doc of docs.rows) {
+      fs.unlink(path.join(UPLOAD_DIR, doc.file_path), () => {});
+    }
+
+    res.json({ status: 'ok' });
   } catch (err) {
     console.error(err);
     res.status(500).json({ status: 'error', message: 'Ошибка сервера' });

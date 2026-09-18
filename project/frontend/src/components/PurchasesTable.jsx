@@ -157,6 +157,16 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
     }
   }
 
+  async function deleteItem(p) {
+    if (!confirm(`Удалить закупку «${p.name}» безвозвратно? Это действие нельзя отменить.`)) return;
+    try {
+      await apiFetch(`/api/purchases/${p.id}`, { method: "DELETE" });
+      load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   return (
     <div>
       <div style={styles.header}>
@@ -249,6 +259,9 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                       <button type="button" onClick={() => transfer(p.id)} style={styles.linkButton}>перенос</button>
                       <button type="button" onClick={() => cancelItem(p.id)} style={{ ...styles.linkButton, color: "var(--danger)" }}>отменить</button>
                     </>
+                  )}
+                  {canReview && p.status === "cancelled" && (
+                    <button type="button" onClick={() => deleteItem(p)} style={{ ...styles.linkButton, color: "var(--danger)" }}>удалить</button>
                   )}
                 </td>
               </tr>
