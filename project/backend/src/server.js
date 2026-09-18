@@ -1,38 +1,39 @@
-require('dotenv').config();
-
 const express = require('express');
 const cors = require('cors');
+const path = require('path');
 
-const healthRoutes = require('./routes/health');
-const authRoutes = require('./routes/auth');
-const branchesRoutes = require('./routes/branches');
-const purchasesRoutes = require('./routes/purchases');
-const documentsRoutes = require('./routes/documents');
+// 1. Импорт всех роутеров из папки routes
+const authRouter = require('./routes/auth');
+const branchesRouter = require('./routes/branches');
+const purchasesRouter = require('./routes/purchases'); // <--- ваш purchases.js
+const documentsRouter = require('./routes/documents');
+const healthRouter = require('./routes/health');
 
 const app = express();
 
+// Мидлвары
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// Роуты
-app.use('/api', healthRoutes);           // /api/health, /api/db-check
-app.use('/api/auth', authRoutes);        // /api/auth/login, /api/auth/me
-app.use('/api/branches', branchesRoutes);// /api/branches
-app.use('/api/purchases', purchasesRoutes); // /api/purchases, /api/purchases/summary...
-app.use('/api/documents', documentsRoutes); // /api/documents (файлы служебок)
+// Статическая папка для загруженных документов (если применимо)
+const uploadDir = process.env.UPLOAD_DIR || path.join(__dirname, '..', '..', 'uploads');
+app.use('/uploads', express.static(uploadDir));
 
-// 404
-app.use((req, res) => {
-  res.status(404).json({ status: 'error', message: 'Маршрут не найден' });
-});
+// 2. Регистрация маршрутов API
+app.use('/api/health', healthRouter);
+app.use('/api/auth', authRouter);
+app.use('/api/branches', branchesRouter);
+app.use('/api/purchases', purchasesRouter); // <--- Подключение закупок
+app.use('/api/documents', documentsRouter);
 
-// Общий обработчик ошибок (на случай, если где-то забыли try/catch)
+// Глобальная обработка ошибок
 app.use((err, req, res, next) => {
-  console.error(err);
+  console.error('Unhandled error:', err);
   res.status(500).json({ status: 'error', message: 'Внутренняя ошибка сервера' });
 });
 
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`Backend запущен на порту ${PORT}`);
+  console.log(`Сервер запущен на порту ${PORT}`);
 });
