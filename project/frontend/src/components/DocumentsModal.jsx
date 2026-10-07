@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { apiDownload, apiFetch, apiUpload } from "../api";
 import { useAuth } from "../context/AuthContext";
 
-function fmtSize(bytes) {
+export function fmtSize(bytes) {
   if (!bytes) return "—";
   const kb = bytes / 1024;
   if (kb < 1024) return `${kb.toFixed(0)} КБ`;
@@ -22,7 +22,7 @@ function fmtDate(d) {
 
 // Иконка по расширению файла — чтобы служебки было видно с первого взгляда,
 // не открывая/не скачивая файл.
-function fileIcon(fileName) {
+export function fileIcon(fileName) {
   const ext = (fileName || "").split(".").pop()?.toLowerCase() || "";
   if (["pdf"].includes(ext)) return "📕";
   if (["doc", "docx", "rtf", "odt"].includes(ext)) return "📄";

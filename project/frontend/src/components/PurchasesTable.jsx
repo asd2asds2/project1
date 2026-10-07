@@ -1,7 +1,7 @@
-import { useEffect, useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, useRef } from "react";
 import { apiFetch } from "../api";
 import { useAuth } from "../context/AuthContext";
-import DocumentsModal from "./DocumentsModal";
+import DocumentsModal, { fileIcon, fmtSize } from "./DocumentsModal";
 import ImportExcelModal from "./ImportExcelModal";
 import ContextMenu from "./ContextMenu";
 import { colorForBranchId } from "../theme/branchPalette";
@@ -567,7 +567,7 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                   <td style={styles.td}>
                     {p.name}
                     {Number(p.documents_count) > 0 && (
-                      <span style={styles.notesBadge} title={`Файлов служебок: ${p.documents_count}`}>📎 {p.documents_count}</span>
+                      <span style={styles.notesBadge} title={`Прикреплено файлов служебок: ${p.documents_count}`}>📎 {p.documents_count}</span>
                     )}
                   </td>
                   {wideColumns && <td style={styles.td}>{p.product_group || "—"}</td>}
@@ -613,9 +613,7 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                           ✏️
                         </button>
                       )}
-                      <button type="button" onClick={() => setFilesFor(p)} style={styles.iconButton} className="icon-btn" title="Файлы служебок">
-                        📎
-                      </button>
+                      <AttachButton purchase={p} onClick={() => setFilesFor(p)} />
                       {canReview && p.source === "branch" && !p.reviewed_at && (
                         <button type="button" onClick={() => review(p.id)} style={styles.iconButton} className="icon-btn" title="Отметить просмотренным">
                           ✓
@@ -793,6 +791,86 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
   );
 }
 
+// Кнопка-скрепка в строке закупки. Если служебки прикреплены — выглядит
+// «закреплённой» (цветная, с цифрой). При наведении сразу показывает список
+// прикреплённых файлов (без задержки обычного title). Список подгружается
+// один раз при первом наведении и сбрасывается, если счётчик файлов изменился.
+function AttachButton({ purchase, onClick }) {
+  const count = Number(purchase.documents_count) || 0;
+  const btnRef = useRef(null);
+  const [pos, setPos] = useState(null); // { top, left } — координаты всплывашки
+  const [docs, setDocs] = useState(null); // null — ещё не загружали
+  const [failed, setFailed] = useState(false);
+  const loadedForCount = useRef(null);
+
+  async function show() {
+    const r = btnRef.current?.getBoundingClientRect();
+    if (r) {
+      // Всплывашка fixed — чтобы её не обрезал overflow таблицы.
+      const width = 300;
+      const left = Math.max(8, Math.min(r.right - width, window.innerWidth - width - 8));
+      setPos({ top: r.bottom + 6, left });
+    }
+    if (count === 0 || loadedForCount.current === count) return;
+    loadedForCount.current = count;
+    setFailed(false);
+    try {
+      const res = await apiFetch(`/api/documents?entity_type=purchase&entity_id=${purchase.id}`);
+      setDocs(res.documents);
+    } catch {
+      loadedForCount.current = null;
+      setFailed(true);
+    }
+  }
+
+  const attached = count > 0;
+
+  return (
+    <>
+      <button
+        ref={btnRef}
+        type="button"
+        onClick={() => { setPos(null); onClick(); }}
+        onMouseEnter={show}
+        onMouseLeave={() => setPos(null)}
+        onFocus={show}
+        onBlur={() => setPos(null)}
+        className="icon-btn"
+        aria-label={attached ? `Прикреплено файлов: ${count}` : "Прикрепить служебку"}
+        style={{
+          ...styles.iconButton,
+          ...(attached
+            ? { color: "var(--success)", background: "var(--success-soft)", fontWeight: 700, display: "inline-flex", alignItems: "center", gap: 3 }
+            : { opacity: 0.6 }),
+        }}
+      >
+        📎{attached && <span style={{ fontSize: 11 }}>{count}</span>}
+      </button>
+
+      {pos && (
+        <div style={{ ...styles.attachPopover, top: pos.top, left: pos.left }} role="tooltip">
+          {!attached && <div style={styles.attachEmpty}>Служебка не прикреплена. Нажмите, чтобы добавить.</div>}
+          {attached && (
+            <>
+              <div style={styles.attachHead}>✓ Прикреплено файлов: {count}</div>
+              {failed && <div style={styles.attachEmpty}>Не удалось загрузить список</div>}
+              {!failed && docs === null && <div style={styles.attachEmpty}>Загрузка…</div>}
+              {docs && docs.map((d) => (
+                <div key={d.id} style={styles.attachRow}>
+                  <span>{fileIcon(d.file_name)}</span>
+                  <span style={styles.attachName}>{d.file_name}</span>
+                  <span style={styles.attachSize}>{fmtSize(d.file_size)}</span>
+                </div>
+              ))}
+              <div style={styles.attachFoot}>Нажмите, чтобы открыть</div>
+            </>
+          )}
+        </div>
+      )}
+    </>
+  );
+}
+
 function statusLabel(status) {
   const map = {
     plan: "в плане",
@@ -931,6 +1009,13 @@ function EditModal({ form, setForm, branches, isNew, onCancel, onSave }) {
 }
 
 const styles = {
+  attachPopover: { position: "fixed", zIndex: 60, width: 300, background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", boxShadow: "var(--shadow-md)", padding: 10, fontSize: 12.5, pointerEvents: "none" },
+  attachHead: { fontWeight: 700, color: "var(--success)", marginBottom: 6 },
+  attachRow: { display: "flex", alignItems: "center", gap: 6, padding: "3px 0" },
+  attachName: { flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" },
+  attachSize: { color: "var(--text-muted)", fontSize: 11, whiteSpace: "nowrap" },
+  attachEmpty: { color: "var(--text-secondary)" },
+  attachFoot: { marginTop: 6, paddingTop: 6, borderTop: "1px solid var(--border)", color: "var(--text-muted)", fontSize: 11 },
   header: { display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, flexWrap: "wrap", gap: 10 },
   title: { margin: 0, fontSize: 20, color: "var(--text)" },
   filterInput: { padding: "7px 10px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", width: 220 },
