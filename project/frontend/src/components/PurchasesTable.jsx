@@ -140,7 +140,9 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
   // Порядок можно менять перетаскиванием только внутри одного конкретного
   // квартала и без активного поиска/фильтра — иначе визуальный порядок строк
   // не совпадает с реальным порядком в квартале, и перетаскивание запутает.
-  const canReorder = canEdit && !!quarter && !effectiveSearch && !pending;
+  // На годовом плане (quarter=null) строки разных кварталов идут подряд, поэтому
+  // там строку можно двигать только внутри её квартала (см. onRowDragOver/Drop).
+  const canReorder = canEdit && !effectiveSearch && !pending;
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -345,11 +347,11 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
 
   // --- Перетаскивание строк (drag-and-drop) ---------------------------------
 
-  async function persistOrder(newItems) {
+  async function persistOrder(orderedIds, q) {
     try {
       await apiFetch(`/api/purchases/reorder`, {
         method: "PATCH",
-        body: JSON.stringify({ year, quarter, order: newItems.map((p) => p.id) }),
+        body: JSON.stringify({ year, quarter: q, order: orderedIds }),
       });
     } catch (err) {
       setError(err.message);
@@ -367,8 +369,16 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
     e.dataTransfer.setData("application/x-purchase-id", String(id));
   }
 
+  // Можно бросать строку только на строку того же квартала.
+  function sameQuarter(aId, bId) {
+    const a = items.find((p) => p.id === aId);
+    const b = items.find((p) => p.id === bId);
+    return !!a && !!b && Number(a.quarter) === Number(b.quarter);
+  }
+
   function onRowDragOver(e, id) {
     if (dragId === null || dragId === id) return;
+    if (!sameQuarter(dragId, id)) return;
     e.preventDefault();
     e.dataTransfer.dropEffect = "move";
     if (overId !== id) setOverId(id);
@@ -376,22 +386,25 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
 
   function onRowDrop(e, id) {
     e.preventDefault();
-    if (dragId === null || dragId === id) {
+    if (dragId === null || dragId === id || !sameQuarter(dragId, id)) {
       setDragId(null);
       setOverId(null);
       return;
     }
-    setItems((prev) => {
-      const fromIdx = prev.findIndex((p) => p.id === dragId);
-      const toIdx = prev.findIndex((p) => p.id === id);
-      if (fromIdx === -1 || toIdx === -1) return prev;
-      const next = [...prev];
-      const [moved] = next.splice(fromIdx, 1);
-      next.splice(toIdx, 0, moved);
-      const renumbered = next.map((p, idx) => ({ ...p, item_no: idx + 1 }));
-      persistOrder(renumbered);
-      return renumbered;
-    });
+    const moved = items.find((p) => p.id === dragId);
+    const q = Number(moved.quarter);
+    // Берём строки только этого квартала в их текущем порядке, двигаем одну
+    // из них и кладём обратно на те же места среди остальных кварталов.
+    const group = items.filter((p) => Number(p.quarter) === q);
+    const fromIdx = group.findIndex((p) => p.id === dragId);
+    const toIdx = group.findIndex((p) => p.id === id);
+    const [m] = group.splice(fromIdx, 1);
+    group.splice(toIdx, 0, m);
+    const renumbered = group.map((p, idx) => ({ ...p, item_no: idx + 1 }));
+    let k = 0;
+    const next = items.map((p) => (Number(p.quarter) === q ? renumbered[k++] : p));
+    setItems(next);
+    persistOrder(renumbered.map((p) => p.id), q);
     setDragId(null);
     setOverId(null);
   }
@@ -475,7 +488,7 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
         {showQuarterColumn && <span>полоса слева — цвет квартала</span>}
         {canReorder && (
           <span style={styles.legendHint}>
-            ⋮⋮ — перетащите, чтобы изменить порядок · перетащите строку на филиал в боковом меню, чтобы перенести закупку · ПКМ по строке — быстрые действия
+            ⋮⋮ — перетащите, чтобы изменить порядок{showQuarterColumn ? " (внутри своего квартала)" : ""} · перетащите строку на филиал в боковом меню, чтобы перенести закупку · ПКМ по строке — быстрые действия
           </span>
         )}
         {!canReorder && canEdit && (
