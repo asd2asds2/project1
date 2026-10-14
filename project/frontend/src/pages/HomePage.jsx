@@ -2,9 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { apiFetch } from "../api";
 import { useAuth } from "../context/AuthContext";
-import { colorForBranchId } from "../theme/branchPalette";
+import { colorForBranchId, BRANCH_PALETTE } from "../theme/branchPalette";
 
 const YEAR = 2026;
+const MONTHS = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"];
 
 function fmtMoney(n) {
   return Number(n || 0).toLocaleString("ru-RU", { minimumFractionDigits: 0, maximumFractionDigits: 0 });
@@ -226,6 +227,198 @@ function BranchBars({ items }) {
   );
 }
 
+/* ───────────── Квартал × филиал: столбцы с накоплением ───────────── */
+function StackedQuarterChart({ data, branchOrder }) {
+  const mounted = useMounted();
+  const [hover, setHover] = useState(null); // { q, key }
+  const W = 520, H = 260, padL = 52, padR = 12, padT = 16, padB = 34;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+  const maxVal = Math.max(1, ...data.map((d) => d.total));
+  const pow = Math.pow(10, Math.floor(Math.log10(maxVal)));
+  const niceMax = Math.ceil(maxVal / (pow / 2)) * (pow / 2);
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => niceMax * t);
+  const groupW = innerW / data.length;
+  const barW = Math.min(56, groupW * 0.55);
+  const y = (v) => padT + innerH - (v / niceMax) * innerH;
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} role="img" aria-label="Суммы по кварталам в разрезе филиалов">
+      {ticks.map((t) => (
+        <g key={t}>
+          <line x1={padL} x2={W - padR} y1={y(t)} y2={y(t)} style={{ stroke: "var(--border)" }} strokeDasharray={t === 0 ? "0" : "3 4"} />
+          <text x={padL - 8} y={y(t)} textAnchor="end" dominantBaseline="central" style={{ fill: "var(--text-muted)", fontSize: 10.5 }}>{fmtShort(t)}</text>
+        </g>
+      ))}
+      {data.map((d, i) => {
+        const cx = padL + groupW * i + groupW / 2;
+        let acc = 0;
+        return (
+          <g key={d.q}>
+            {d.segments.map((sg) => {
+              const h = (sg.value / niceMax) * innerH;
+              const yy = padT + innerH - ((acc + sg.value) / niceMax) * innerH;
+              acc += sg.value;
+              const isHover = hover && hover.q === d.q && hover.key === sg.key;
+              return (
+                <rect
+                  key={sg.key}
+                  x={cx - barW / 2} y={yy} width={barW} height={Math.max(0, h)}
+                  fill={sg.color}
+                  style={{
+                    transformBox: "fill-box", transformOrigin: "bottom",
+                    transform: mounted ? "scaleY(1)" : "scaleY(0)",
+                    transition: `transform .8s cubic-bezier(.2,.8,.2,1) ${i * 80}ms, opacity .15s`,
+                    opacity: hover && !isHover ? 0.4 : 1,
+                    stroke: "var(--surface)", strokeWidth: 1,
+                    cursor: "pointer",
+                  }}
+                  onMouseEnter={() => setHover({ q: d.q, key: sg.key })}
+                  onMouseLeave={() => setHover(null)}
+                >
+                  <title>{`${sg.name}: ${fmtMoney(sg.value)} ₽ (${d.q} кв.)`}</title>
+                </rect>
+              );
+            })}
+            {d.total > 0 && (
+              <text x={cx} y={y(d.total) - 6} textAnchor="middle" style={{ fill: "var(--text)", fontSize: 10.5, fontWeight: 600, opacity: mounted ? 1 : 0, transition: "opacity .6s .6s" }}>
+                {fmtShort(d.total)}
+              </text>
+            )}
+            <text x={cx} y={H - 12} textAnchor="middle" style={{ fill: "var(--text-secondary)", fontSize: 12, fontWeight: 600 }}>{d.q} кв.</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+/* ───────────── Нарастающий итог по месяцам vs план на год ───────────── */
+function CumulativeChart({ months, yearPlan }) {
+  const mounted = useMounted();
+  const [hover, setHover] = useState(null);
+  const W = 520, H = 260, padL = 52, padR = 14, padT = 18, padB = 32;
+  const innerW = W - padL - padR, innerH = H - padT - padB;
+
+  let run = 0;
+  const pts = months.map((m) => { run += m.total; return { ...m, cum: run }; });
+  const maxVal = Math.max(1, yearPlan, run);
+  const pow = Math.pow(10, Math.floor(Math.log10(maxVal)));
+  const niceMax = Math.ceil(maxVal / (pow / 2)) * (pow / 2);
+  const ticks = [0, 0.25, 0.5, 0.75, 1].map((t) => niceMax * t);
+  const step = innerW / 11;
+  const x = (i) => padL + step * i;
+  const y = (v) => padT + innerH - (v / niceMax) * innerH;
+
+  const line = pts.map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(1)},${y(p.cum).toFixed(1)}`).join(" ");
+  const area = `${line} L${x(11)},${y(0)} L${x(0)},${y(0)} Z`;
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} role="img" aria-label="Нарастающий итог по месяцам">
+      <defs>
+        <linearGradient id="cumGrad" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" style={{ stopColor: "var(--accent)", stopOpacity: 0.35 }} />
+          <stop offset="100%" style={{ stopColor: "var(--accent)", stopOpacity: 0.02 }} />
+        </linearGradient>
+        <clipPath id="cumClip">
+          <rect x="0" y="0" height={H} width={mounted ? W : 0} style={{ transition: "width 1.2s cubic-bezier(.2,.8,.2,1)" }} />
+        </clipPath>
+      </defs>
+      {ticks.map((t) => (
+        <g key={t}>
+          <line x1={padL} x2={W - padR} y1={y(t)} y2={y(t)} style={{ stroke: "var(--border)" }} strokeDasharray={t === 0 ? "0" : "3 4"} />
+          <text x={padL - 8} y={y(t)} textAnchor="end" dominantBaseline="central" style={{ fill: "var(--text-muted)", fontSize: 10.5 }}>{fmtShort(t)}</text>
+        </g>
+      ))}
+      {yearPlan > 0 && (
+        <g>
+          <line x1={padL} x2={W - padR} y1={y(yearPlan)} y2={y(yearPlan)} style={{ stroke: "var(--warning)" }} strokeWidth="1.4" strokeDasharray="6 4" />
+          <text x={W - padR} y={y(yearPlan) - 6} textAnchor="end" style={{ fill: "var(--warning)", fontSize: 10.5, fontWeight: 600 }}>план {fmtShort(yearPlan)}</text>
+        </g>
+      )}
+      <g clipPath="url(#cumClip)">
+        <path d={area} fill="url(#cumGrad)" />
+        <path d={line} fill="none" style={{ stroke: "var(--accent)" }} strokeWidth="2.4" strokeLinejoin="round" strokeLinecap="round" />
+        {pts.map((p, i) => (
+          <circle key={i} cx={x(i)} cy={y(p.cum)} r={hover === i ? 5 : 3} style={{ fill: "var(--surface)", stroke: "var(--accent)", strokeWidth: 2, transition: "r .12s" }} />
+        ))}
+      </g>
+      {pts.map((p, i) => (
+        <g key={`h${i}`}>
+          <rect
+            x={x(i) - step / 2} y={padT} width={step} height={innerH} fill="transparent"
+            onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
+          >
+            <title>{`${MONTHS[i]}: +${fmtMoney(p.total)} ₽, нарастающим ${fmtMoney(p.cum)} ₽ (${p.items} ${plural(p.items)})`}</title>
+          </rect>
+          <text x={x(i)} y={H - 10} textAnchor="middle" style={{ fill: hover === i ? "var(--text)" : "var(--text-muted)", fontSize: 10.5, fontWeight: hover === i ? 700 : 400 }}>{MONTHS[i]}</text>
+        </g>
+      ))}
+      {hover !== null && (
+        <g pointerEvents="none">
+          <line x1={x(hover)} x2={x(hover)} y1={padT} y2={padT + innerH} style={{ stroke: "var(--text-muted)" }} strokeDasharray="2 3" />
+          <text
+            x={Math.min(Math.max(x(hover), padL + 50), W - padR - 50)} y={padT - 4} textAnchor="middle"
+            style={{ fill: "var(--text)", fontSize: 11, fontWeight: 700 }}
+          >
+            {fmtShort(pts[hover].cum)} ₽
+          </text>
+        </g>
+      )}
+    </svg>
+  );
+}
+
+/* ───────────── Способы закупки: пончик + список ───────────── */
+function MethodChart({ items, total }) {
+  const mounted = useMounted();
+  const [hover, setHover] = useState(null);
+  const r = 54, c = 2 * Math.PI * r, gap = items.length > 1 ? 2 : 0;
+  let acc = 0;
+  const active = hover !== null ? items[hover] : null;
+  return (
+    <div style={{ display: "flex", gap: 18, alignItems: "center", flexWrap: "wrap", justifyContent: "center" }}>
+      <svg width="160" height="160" viewBox="0 0 160 160" style={{ flexShrink: 0 }} role="img" aria-label="Способы закупки">
+        <circle cx="80" cy="80" r={r} fill="none" style={{ stroke: "var(--border)" }} strokeWidth="20" />
+        {items.map((it, i) => {
+          const len = (it.total / total) * c;
+          const seg = Math.max(0, len - gap);
+          const off = -acc;
+          acc += len;
+          return (
+            <circle
+              key={it.method} cx="80" cy="80" r={r} fill="none" stroke={it.color}
+              strokeWidth={hover === i ? 26 : 20}
+              strokeDasharray={`${mounted ? seg : 0} ${c}`} strokeDashoffset={off}
+              transform="rotate(-90 80 80)"
+              style={{ transition: "stroke-dasharray .9s cubic-bezier(.2,.8,.2,1), stroke-width .15s", cursor: "pointer", opacity: hover === null || hover === i ? 1 : 0.35 }}
+              onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
+            >
+              <title>{`${it.method}: ${fmtMoney(it.total)} ₽, ${it.items} ${plural(it.items)}`}</title>
+            </circle>
+          );
+        })}
+        <text x="80" y="72" textAnchor="middle" style={{ fill: "var(--text-muted)", fontSize: 10.5, textTransform: "uppercase", letterSpacing: 0.5 }}>{active ? active.method : "Способов"}</text>
+        <text x="80" y="94" textAnchor="middle" style={{ fill: "var(--text)", fontSize: 20, fontWeight: 700 }}>{active ? `${Math.round((active.total / total) * 100)}%` : items.length}</text>
+        <text x="80" y="111" textAnchor="middle" style={{ fill: "var(--text-secondary)", fontSize: 10.5 }}>{active ? fmtShort(active.total) : "закупки"}</text>
+      </svg>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8, flex: 1, minWidth: 160 }}>
+        {items.map((it, i) => (
+          <div
+            key={it.method}
+            onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
+            style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, opacity: hover === null || hover === i ? 1 : 0.45, transition: "opacity .15s" }}
+          >
+            <span style={{ width: 10, height: 10, borderRadius: 3, background: it.color, flexShrink: 0 }} />
+            <span style={{ flex: 1, color: "var(--text)", fontWeight: 600 }}>{it.method}</span>
+            <span style={{ color: "var(--text-muted)", fontVariantNumeric: "tabular-nums" }}>{it.items} шт.</span>
+            <span style={{ color: "var(--text-secondary)", fontVariantNumeric: "tabular-nums", minWidth: 62, textAlign: "right" }}>{fmtShort(it.total)} ₽</span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 export default function HomePage() {
   const { user } = useAuth();
   const canReview = user?.role === "admin" || user?.role === "financier";
@@ -289,6 +482,54 @@ export default function HomePage() {
   );
   const branchTotal = branchItems.reduce((s, b) => s + b.total, 0);
   const donutItems = branchItems.filter((b) => b.total > 0);
+
+  // Квартал × филиал
+  const stackedData = useMemo(() => {
+    const rows = summary?.byQuarterBranch || [];
+    return [1, 2, 3, 4].map((q) => {
+      const segments = rows
+        .filter((r) => Number(r.quarter) === q && Number(r.total) > 0)
+        .map((r) => ({
+          key: String(r.branch_id), name: r.branch_name, value: Number(r.total),
+          color: colorForBranchId(branches, r.branch_id),
+        }))
+        .sort((a, b) => b.value - a.value);
+      return { q, segments, total: segments.reduce((s, x) => s + x.value, 0) };
+    });
+  }, [summary, branches]);
+  const hasStacked = stackedData.some((d) => d.total > 0);
+
+  // Месяцы (12 точек, пустые = 0)
+  const monthData = useMemo(
+    () =>
+      Array.from({ length: 12 }, (_, i) => {
+        const row = summary?.byMonth?.find((r) => Number(r.month) === i + 1);
+        return { month: i + 1, total: row ? Number(row.total) : 0, items: row ? Number(row.items) : 0 };
+      }),
+    [summary]
+  );
+  const hasMonths = monthData.some((m) => m.total > 0);
+  const datedItems = monthData.reduce((s, m) => s + m.items, 0);
+
+  // Способы закупки
+  const methodItems = useMemo(
+    () =>
+      (summary?.byMethod || [])
+        .map((m, i) => ({ method: m.method, total: Number(m.total), items: Number(m.items), color: BRANCH_PALETTE[(i * 5) % BRANCH_PALETTE.length] }))
+        .filter((m) => m.total > 0),
+    [summary]
+  );
+  const methodTotal = methodItems.reduce((s, m) => s + m.total, 0);
+
+  // Группы товаров (переиспользуем BranchBars: ему нужны branch_id / branch_name)
+  const groupItems = useMemo(
+    () =>
+      (summary?.byGroup || []).map((g, i) => ({
+        branch_id: `g${i}`, branch_name: g.product_group, total: Number(g.total),
+        color: BRANCH_PALETTE[(i * 2 + 1) % BRANCH_PALETTE.length],
+      })),
+    [summary]
+  );
 
   const maxQuarterTotal = Math.max(1, ...quarterData.map((d) => d.fact));
 
@@ -417,6 +658,77 @@ export default function HomePage() {
           <BranchBars items={branchItems} />
         )}
       </div>
+
+      {/* ── Аналитика ── */}
+      <h2 style={styles.h2}>Аналитика</h2>
+      <div style={styles.analyticsGrid}>
+        <div style={styles.panel}>
+          <div style={styles.panelHead}>
+            <h2 style={styles.panelTitle}>Кварталы по филиалам</h2>
+            <span style={styles.panelHint}>наведите на сегмент</span>
+          </div>
+          {!summary ? (
+            <div style={styles.empty}>Загрузка…</div>
+          ) : hasStacked ? (
+            <StackedQuarterChart data={stackedData} />
+          ) : (
+            <div style={styles.empty}>Нет данных</div>
+          )}
+        </div>
+
+        <div style={styles.panel}>
+          <div style={styles.panelHead}>
+            <h2 style={styles.panelTitle}>Нарастающий итог по месяцам</h2>
+            <div style={styles.legend}>
+              <span style={styles.legendItem}><i style={{ ...styles.legendSwatch, background: "var(--accent)" }} /> размещение</span>
+              <span style={styles.legendItem}><i style={{ ...styles.legendSwatch, border: "1.5px dashed var(--warning)" }} /> план</span>
+            </div>
+          </div>
+          {!summary ? (
+            <div style={styles.empty}>Загрузка…</div>
+          ) : hasMonths ? (
+            <>
+              <CumulativeChart months={monthData} yearPlan={yearPlan} />
+              <div style={styles.note}>По дате размещения извещения · учтено {datedItems} {plural(datedItems)} из {yearItems}</div>
+            </>
+          ) : (
+            <div style={styles.empty}>Нет закупок с датой размещения извещения</div>
+          )}
+        </div>
+
+        <div style={styles.panel}>
+          <div style={styles.panelHead}>
+            <h2 style={styles.panelTitle}>Способы закупки</h2>
+          </div>
+          {!summary ? (
+            <div style={styles.empty}>Загрузка…</div>
+          ) : methodTotal > 0 ? (
+            <MethodChart items={methodItems} total={methodTotal} />
+          ) : (
+            <div style={styles.empty}>Нет данных</div>
+          )}
+        </div>
+
+        <div style={styles.panel}>
+          <div style={styles.panelHead}>
+            <h2 style={styles.panelTitle}>Крупнейшие группы товаров</h2>
+          </div>
+          {!summary ? (
+            <div style={styles.empty}>Загрузка…</div>
+          ) : groupItems.length > 0 ? (
+            <BranchBars items={groupItems} />
+          ) : (
+            <div style={styles.empty}>Группы товаров не заполнены</div>
+          )}
+        </div>
+      </div>
+
+      {summary?.cancelled?.items > 0 && (
+        <div style={styles.cancelledStrip}>
+          <span>Отменено закупок: <b>{summary.cancelled.items}</b></span>
+          <span style={{ color: "var(--text-muted)" }}>на сумму {fmtMoney(summary.cancelled.total)} ₽ — в графики не входят</span>
+        </div>
+      )}
     </div>
   );
 }
@@ -443,6 +755,7 @@ const styles = {
   kpiValue: { fontSize: 26, fontWeight: 700, marginTop: 6, color: "var(--text)", letterSpacing: -0.3, fontVariantNumeric: "tabular-nums" },
 
   chartGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(340px, 1fr))", gap: 14 },
+  analyticsGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(min(100%, 440px), 1fr))", gap: 14 },
   panel: {
     background: "var(--surface)", border: "1px solid var(--border)", borderRadius: 12,
     padding: 18, boxShadow: "var(--shadow-sm)", minWidth: 0,
@@ -452,6 +765,9 @@ const styles = {
   legend: { display: "flex", gap: 14, fontSize: 12, color: "var(--text-secondary)" },
   legendItem: { display: "inline-flex", alignItems: "center", gap: 6 },
   legendSwatch: { display: "inline-block", width: 12, height: 12, borderRadius: 3 },
+  panelHint: { fontSize: 11.5, color: "var(--text-muted)" },
+  note: { fontSize: 11.5, color: "var(--text-muted)", marginTop: 8 },
+  cancelledStrip: { display: "flex", justifyContent: "space-between", flexWrap: "wrap", gap: 8, marginTop: 14, padding: "10px 14px", background: "var(--surface-2)", border: "1px dashed var(--border)", borderRadius: 10, fontSize: 12.5, color: "var(--text-secondary)" },
   empty: { color: "var(--text-muted)", fontSize: 13, padding: "30px 0", textAlign: "center" },
 
   grid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))", gap: 14 },

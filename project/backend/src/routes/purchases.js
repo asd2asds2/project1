@@ -65,10 +65,76 @@ router.get('/summary', async (req, res) => {
       [year]
     );
 
+    // Квартал × филиал (для столбцов с накоплением)
+    const byQuarterBranch = await pool.query(
+      `WITH qb AS (
+         SELECT p.quarter, p.branch_id, p.amount
+         FROM purchases p
+         WHERE p.year = $1 AND p.status <> 'cancelled' AND p.branch_id IS NOT NULL
+         UNION ALL
+         SELECT p.quarter, s.branch_id, s.amount
+         FROM purchase_branch_shares s
+         JOIN purchases p ON p.id = s.purchase_id
+         WHERE p.year = $1 AND p.status <> 'cancelled'
+       )
+       SELECT qb.quarter, qb.branch_id, b.name AS branch_name, SUM(qb.amount) AS total
+       FROM qb JOIN branches b ON b.id = qb.branch_id
+       GROUP BY qb.quarter, qb.branch_id, b.name
+       ORDER BY qb.quarter`,
+      [year]
+    );
+
+    // Способы закупки
+    const byMethod = await pool.query(
+      `SELECT COALESCE(NULLIF(method, ''), 'Другое') AS method,
+              COALESCE(SUM(amount), 0) AS total, COUNT(*) AS items
+       FROM purchases
+       WHERE year = $1 AND status <> 'cancelled'
+       GROUP BY 1
+       ORDER BY total DESC`,
+      [year]
+    );
+
+    // По месяцам размещения извещения (notice_date)
+    const byMonth = await pool.query(
+      `SELECT EXTRACT(MONTH FROM notice_date)::int AS month,
+              COALESCE(SUM(amount), 0) AS total, COUNT(*) AS items
+       FROM purchases
+       WHERE year = $1 AND status <> 'cancelled'
+         AND notice_date IS NOT NULL AND EXTRACT(YEAR FROM notice_date) = $1
+       GROUP BY 1
+       ORDER BY 1`,
+      [year]
+    );
+
+    // Топ групп товаров
+    const byGroup = await pool.query(
+      `SELECT product_group, COALESCE(SUM(amount), 0) AS total, COUNT(*) AS items
+       FROM purchases
+       WHERE year = $1 AND status <> 'cancelled'
+         AND product_group IS NOT NULL AND product_group <> ''
+       GROUP BY product_group
+       ORDER BY total DESC
+       LIMIT 6`,
+      [year]
+    );
+
+    // Отменённые закупки
+    const cancelled = await pool.query(
+      `SELECT COUNT(*) AS items, COALESCE(SUM(amount), 0) AS total
+       FROM purchases WHERE year = $1 AND status = 'cancelled'`,
+      [year]
+    );
+
     res.json({
       status: 'ok',
       byQuarter: byQuarter.rows,
       byBranch: byBranch.rows,
+      byQuarterBranch: byQuarterBranch.rows,
+      byMethod: byMethod.rows,
+      byMonth: byMonth.rows,
+      byGroup: byGroup.rows,
+      cancelled: { items: Number(cancelled.rows[0].items), total: Number(cancelled.rows[0].total) },
       pendingReview: Number(pendingReview.rows[0].cnt),
     });
   } catch (err) {
