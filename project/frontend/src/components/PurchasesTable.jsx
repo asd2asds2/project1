@@ -137,6 +137,51 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
     });
   }
 
+  // --- Горизонтальная прокрутка таблицы ---------------------------------------
+  // Свайп пальцем влево/вправо работает нативно (overflow-x у обёртки), а чтобы
+  // не искать полосу прокрутки в самом низу длинной таблицы, дублируем её
+  // сверху: верхняя и нижняя полосы синхронизированы между собой.
+  const wrapRef = useRef(null);
+  const topBarRef = useRef(null);
+  const syncing = useRef(false);
+  const [scrollW, setScrollW] = useState(0);
+  const [hasHScroll, setHasHScroll] = useState(false);
+  // На сенсорных экранах строки НЕ делаем draggable: иначе браузер может
+  // принять свайп за начало перетаскивания строки и не прокручивать таблицу.
+  // (Порядок/перенос перетаскиванием остаётся на десктопе с мышью.)
+  const [finePointer] = useState(() => {
+    try {
+      return window.matchMedia("(pointer: fine)").matches;
+    } catch {
+      return true;
+    }
+  });
+
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    function measure() {
+      setScrollW(el.scrollWidth);
+      setHasHScroll(el.scrollWidth > el.clientWidth + 1);
+    }
+    measure();
+    if (typeof ResizeObserver === "undefined") return;
+    const ro = new ResizeObserver(measure);
+    ro.observe(el);
+    if (el.firstElementChild) ro.observe(el.firstElementChild);
+    return () => ro.disconnect();
+  }, [items, wideColumns, loading, showQuarterColumn]);
+
+  function syncScroll(from, to) {
+    if (!from || !to) return;
+    if (syncing.current) {
+      syncing.current = false;
+      return;
+    }
+    syncing.current = true;
+    to.scrollLeft = from.scrollLeft;
+  }
+
   const effectiveSearch = search || localSearch;
   // Порядок можно менять перетаскиванием только внутри одного конкретного
   // квартала и без активного поиска/фильтра — иначе визуальный порядок строк
@@ -590,7 +635,24 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
         {!canReorder && !canEdit && <span style={styles.legendHint}>ПКМ по строке — быстрые действия</span>}
       </div>
 
-      <div style={styles.tableWrap}>
+      {hasHScroll && (
+        <div
+          ref={topBarRef}
+          className="table-scroll"
+          style={styles.topScrollBar}
+          onScroll={() => syncScroll(topBarRef.current, wrapRef.current)}
+          aria-hidden="true"
+        >
+          <div style={{ width: scrollW, height: 1 }} />
+        </div>
+      )}
+
+      <div
+        ref={wrapRef}
+        className="table-scroll"
+        style={styles.tableWrap}
+        onScroll={() => syncScroll(wrapRef.current, topBarRef.current)}
+      >
         <table>
           <thead>
             <tr>
@@ -636,7 +698,7 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                     boxShadow: isDropTarget ? "inset 0 2px 0 var(--accent)" : "none",
                     cursor: "context-menu",
                   }}
-                  draggable={canEdit}
+                  draggable={canEdit && finePointer}
                   onDragStart={canEdit ? (e) => onRowDragStart(e, p.id) : undefined}
                   onDragOver={canReorder ? (e) => onRowDragOver(e, p.id) : undefined}
                   onDrop={canReorder ? (e) => onRowDrop(e, p.id) : undefined}
@@ -1132,7 +1194,8 @@ const styles = {
   legend: { display: "flex", gap: 18, fontSize: 12, color: "var(--text-secondary)", marginBottom: 10, flexWrap: "wrap", alignItems: "center" },
   legendHint: { marginLeft: "auto", fontStyle: "italic", color: "var(--text-muted)" },
   dot: { display: "inline-block", width: 9, height: 9, borderRadius: "50%", marginRight: 5 },
-  tableWrap: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "auto", boxShadow: "var(--shadow-sm)" },
+  tableWrap: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "auto", boxShadow: "var(--shadow-sm)", WebkitOverflowScrolling: "touch", overscrollBehaviorX: "contain" },
+  topScrollBar: { overflowX: "auto", overflowY: "hidden", marginBottom: 6, WebkitOverflowScrolling: "touch" },
   th: { textAlign: "left", padding: "10px 12px", borderBottom: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: 12, textTransform: "uppercase", letterSpacing: 0.3, whiteSpace: "nowrap" },
   td: { padding: "9px 12px", borderBottom: "1px solid var(--border)", fontSize: 13.5, color: "var(--text)" },
   dragHandleCell: { padding: "9px 4px", textAlign: "center" },

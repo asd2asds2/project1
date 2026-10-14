@@ -104,3 +104,11 @@ table { border-collapse: collapse; width: 100%; }
 .purchase-row[draggable="true"]:hover .drag-handle { color: var(--text-secondary); }
 .primary-btn:hover { filter: brightness(1.08); }
 .secondary-btn:hover { background: var(--border) !important; }
+
+
+/* Горизонтальная прокрутка таблицы закупок: полоса потолще и контрастнее,
+   чтобы её было видно и легко ухватить (верхняя и нижняя). */
+.table-scroll { scrollbar-width: auto; scrollbar-color: var(--text-muted) var(--surface-2); }
+.table-scroll::-webkit-scrollbar { height: 14px; }
+.table-scroll::-webkit-scrollbar-track { background: var(--surface-2); border-radius: 7px; }
+.table-scroll::-webkit-scrollbar-thumb { background: var(--text-muted); border-radius: 7px; border: 2px solid var(--surface-2); }
