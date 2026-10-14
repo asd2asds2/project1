@@ -23,6 +23,22 @@ const QUARTER_COLORS = {
   4: "#8a4fd1",
 };
 
+// Дата + N рабочих дней (суббота и воскресенье не считаются).
+// iso — строка "YYYY-MM-DD" из <input type="date">. Считаем в UTC, чтобы
+// часовой пояс браузера не сдвинул дату на сутки. Праздничные дни не учитываем.
+function addWorkdays(iso, n) {
+  if (!iso) return "";
+  const d = new Date(`${iso.slice(0, 10)}T00:00:00Z`);
+  if (Number.isNaN(d.getTime())) return "";
+  let left = n;
+  while (left > 0) {
+    d.setUTCDate(d.getUTCDate() + 1);
+    const wd = d.getUTCDay(); // 0 — воскресенье, 6 — суббота
+    if (wd !== 0 && wd !== 6) left--;
+  }
+  return d.toISOString().slice(0, 10);
+}
+
 function fmtMoney(n) {
   return Number(n || 0).toLocaleString("ru-RU", { minimumFractionDigits: 0 });
 }
@@ -1029,7 +1045,7 @@ function AttachButton({ purchase, onClick }) {
                   <span style={styles.attachSize}>{fmtSize(d.file_size)}</span>
                 </div>
               ))}
-              <div style={styles.attachFoot}>Нажмите, чтобы открыть</div>
+              <div style={styles.attachFoot}>Нажмите 📎, чтобы открыть список и файлы</div>
             </>
           )}
         </div>
@@ -1142,12 +1158,24 @@ function EditModal({ form, setForm, branches, isNew, onCancel, onSave }) {
 
           <label style={styles.label}>
             Дата подачи ТЗ
-            <input type="date" value={form.tz_date} onChange={(e) => set("tz_date", e.target.value)} style={styles.input} />
+            <input
+              type="date"
+              value={form.tz_date}
+              onChange={(e) => {
+                const v = e.target.value;
+                // Дата размещения извещения = дата подачи ТЗ + 5 рабочих дней (без выходных).
+                setForm((f) => ({ ...f, tz_date: v, notice_date: v ? addWorkdays(v, 5) : f.notice_date }));
+              }}
+              style={styles.input}
+            />
           </label>
 
           <label style={styles.label}>
             Дата размещения извещения
             <input type="date" value={form.notice_date} onChange={(e) => set("notice_date", e.target.value)} style={styles.input} />
+            <span style={{ fontSize: 11.5, color: "var(--text-muted)", fontWeight: 400 }}>
+              считается сама: дата подачи ТЗ + 5 рабочих дней, можно поправить вручную
+            </span>
           </label>
 
           <label style={styles.label}>
