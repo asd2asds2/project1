@@ -112,6 +112,7 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
   const [menu, setMenu] = useState(null); // { x, y, purchase } — контекстное меню по ПКМ
   const [dragId, setDragId] = useState(null);
   const [overId, setOverId] = useState(null);
+  const [selected, setSelected] = useState(() => new Set()); // id закупок, отмеченных галочками для массового удаления
   // Часть колонок (второстепенные, редко нужные) по умолчанию скрыта,
   // чтобы таблица помещалась по ширине без горизонтального скролла целиком
   // экрана. Кнопка "Показать все колонки" раскрывает их обратно.
@@ -170,6 +171,17 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
   }, [year, quarter, search, pending, localSearch]);
 
   useEffect(() => { load(); }, [load]);
+
+  // Если список обновился (смена квартала/фильтра, удаление) — снимаем галочки
+  // с закупок, которых на странице больше нет.
+  useEffect(() => {
+    setSelected((prev) => {
+      if (prev.size === 0) return prev;
+      const visible = new Set(items.map((i) => i.id));
+      const next = new Set([...prev].filter((id) => visible.has(id)));
+      return next.size === prev.size ? prev : next;
+    });
+  }, [items]);
 
   // При смене страницы (квартал/год/поиск) локальный фильтр обнуляется.
   useEffect(() => { setLocalSearch(""); }, [year, quarter, search, pending]);
@@ -320,10 +332,75 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
   }
 
   async function deleteItem(p) {
-    if (!confirm(`Удалить закупку «${p.name}» безвозвратно? Это действие нельзя отменить.`)) return;
+    const files = Number(p.documents_count) > 0 ? ` Вместе с ней удалятся прикреплённые файлы (${p.documents_count}).` : "";
+    if (!confirm(`Удалить закупку «${p.name}» безвозвратно?${files} Это действие нельзя отменить.`)) return;
     try {
       await apiFetch(`/api/purchases/${p.id}`, { method: "DELETE" });
       load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  // --- Массовое удаление -----------------------------------------------------
+  function toggleSelected(id) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  const allSelected = items.length > 0 && items.every((i) => selected.has(i.id));
+
+  function toggleSelectAll() {
+    setSelected(allSelected ? new Set() : new Set(items.map((i) => i.id)));
+  }
+
+  async function deleteSelected() {
+    const ids = [...selected];
+    if (ids.length === 0) return;
+    if (!confirm(`Удалить выбранные закупки (${ids.length} шт.) безвозвратно? Прикреплённые файлы тоже удалятся. Это действие нельзя отменить.`)) return;
+    try {
+      const res = await apiFetch(`/api/purchases/bulk-delete`, { method: "POST", body: JSON.stringify({ ids }) });
+      setSelected(new Set());
+      setError("");
+      load();
+      alert(`Удалено закупок: ${res.deleted}`);
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  // Удаление целого квартала за выбранный год. На странице квартала берём его
+  // номер оттуда, на годовом плане — спрашиваем.
+  async function deleteWholeQuarter() {
+    let q = quarter;
+    if (!q) {
+      const input = prompt(`Удалить ВСЕ закупки какого квартала за ${year} год? (1-4)`);
+      if (!input) return;
+      q = Number(input);
+      if (!Number.isInteger(q) || q < 1 || q > 4) {
+        setError("Квартал должен быть числом от 1 до 4");
+        return;
+      }
+    }
+    const typed = prompt(
+      `Будут безвозвратно удалены ВСЕ закупки ${q} квартала ${year} года вместе с прикреплёнными файлами. ` +
+      `Это действие нельзя отменить.\n\nДля подтверждения введите слово УДАЛИТЬ:`
+    );
+    if (typed === null) return;
+    if (typed.trim().toUpperCase() !== "УДАЛИТЬ") {
+      setError("Удаление квартала отменено: слово подтверждения введено неверно");
+      return;
+    }
+    try {
+      const res = await apiFetch(`/api/purchases/bulk-delete`, { method: "POST", body: JSON.stringify({ year, quarter: q }) });
+      setSelected(new Set());
+      setError("");
+      load();
+      alert(`Удалено закупок: ${res.deleted}`);
     } catch (err) {
       setError(err.message);
     }
@@ -442,6 +519,9 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
     if (canReview && p.status === "cancelled") {
       items.push({ divider: true });
       items.push({ label: "Вернуть из отмены", icon: "↺", onClick: () => restoreItem(p.id) });
+    }
+    if (canReview) {
+      items.push({ divider: true });
       items.push({ label: "Удалить безвозвратно", icon: "🗑", danger: true, onClick: () => deleteItem(p) });
     }
     return items;
@@ -450,7 +530,7 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
   // Для colSpan строк "Загрузка…" / "Пока нет закупок" — считаем реально
   // отображаемые колонки: 7 всегда видимых (№, Наименование, НМЦ,
   // Потребители, ОКПД2, Статус, действия) + опциональные.
-  const columnCount = 7 + (canReorder ? 1 : 0) + (showQuarterColumn ? 1 : 0) + (wideColumns ? 6 : 0);
+  const columnCount = 7 + (canReview ? 1 : 0) + (canReorder ? 1 : 0) + (showQuarterColumn ? 1 : 0) + (wideColumns ? 6 : 0);
 
   return (
     <div>
@@ -468,6 +548,16 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
           <button type="button" onClick={toggleWideColumns} style={styles.secondaryButton} className="secondary-btn">
             {wideColumns ? "Скрыть доп. колонки" : "Показать все колонки"}
           </button>
+          {canReview && selected.size > 0 && (
+            <button type="button" onClick={deleteSelected} style={styles.dangerButton}>
+              🗑 Удалить выбранные ({selected.size})
+            </button>
+          )}
+          {canReview && !search && !pending && (
+            <button type="button" onClick={deleteWholeQuarter} style={styles.dangerOutlineButton}>
+              {quarter ? `Удалить весь ${quarter} квартал` : "Удалить квартал…"}
+            </button>
+          )}
           {canImport && (
             <button type="button" onClick={() => setImporting(true)} style={styles.secondaryButton} className="secondary-btn">
               Импорт из Excel
@@ -504,6 +594,11 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
         <table>
           <thead>
             <tr>
+              {canReview && (
+                <th style={{ ...styles.th, width: 28 }}>
+                  <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} title="Выбрать все на странице" />
+                </th>
+              )}
               {canReorder && <th style={{ ...styles.th, width: 28 }}></th>}
               <th style={styles.th}>№ п/п</th>
               {showQuarterColumn && <th style={styles.th}>Кв.</th>}
@@ -548,6 +643,11 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                   onDragEnd={canEdit ? onRowDragEnd : undefined}
                   onContextMenu={(e) => openContextMenu(e, p)}
                 >
+                  {canReview && (
+                    <td style={styles.td}>
+                      <input type="checkbox" checked={selected.has(p.id)} onChange={() => toggleSelected(p.id)} />
+                    </td>
+                  )}
                   {canReorder && (
                     <td style={{ ...styles.td, ...styles.dragHandleCell }} title="Перетащите, чтобы изменить порядок">
                       <span style={styles.dragHandle} className="drag-handle">⋮⋮</span>
@@ -647,15 +747,17 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                           >
                             ↺
                           </button>
-                          <button
-                            type="button"
-                            onClick={() => deleteItem(p)}
-                            style={{ ...styles.iconButton, color: "var(--danger)" }} className="icon-btn"
-                            title="Удалить безвозвратно"
-                          >
-                            🗑
-                          </button>
                         </>
+                      )}
+                      {canReview && (
+                        <button
+                          type="button"
+                          onClick={() => deleteItem(p)}
+                          style={{ ...styles.iconButton, color: "var(--danger)" }} className="icon-btn"
+                          title="Удалить безвозвратно"
+                        >
+                          🗑
+                        </button>
                       )}
                       <button
                         type="button"
@@ -1024,6 +1126,8 @@ const styles = {
   filterInput: { padding: "7px 10px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", width: 220 },
   primaryButton: { background: "var(--accent)", color: "var(--accent-contrast)", border: "none", borderRadius: "var(--radius-sm)", padding: "8px 14px", cursor: "pointer", fontWeight: 600, transition: "filter 0.15s" },
   secondaryButton: { background: "var(--surface-2)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "8px 14px", cursor: "pointer" },
+  dangerButton: { background: "var(--danger)", color: "#fff", border: "1px solid var(--danger)", borderRadius: "var(--radius-sm)", padding: "8px 14px", cursor: "pointer" },
+  dangerOutlineButton: { background: "var(--surface-2)", color: "var(--danger)", border: "1px solid var(--danger)", borderRadius: "var(--radius-sm)", padding: "8px 14px", cursor: "pointer" },
   errorBox: { background: "var(--danger-soft)", color: "var(--danger)", padding: "10px 14px", borderRadius: "var(--radius-sm)", marginBottom: 12 },
   legend: { display: "flex", gap: 18, fontSize: 12, color: "var(--text-secondary)", marginBottom: 10, flexWrap: "wrap", alignItems: "center" },
   legendHint: { marginLeft: "auto", fontStyle: "italic", color: "var(--text-muted)" },

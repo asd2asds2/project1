@@ -571,39 +571,101 @@ router.post('/:id/restore', requireRole('admin', 'financier'), async (req, res) 
 });
 
 // ---------------------------------------------------------------------------
-// Полное удаление закупки — только если она уже отменена (status = 'cancelled').
-// Заодно удаляет её файлы служебок (и метаданные, и сами файлы с диска).
+// Полное удаление закупок (одной или сразу многих).
+// Заодно удаляет файлы служебок (и метаданные, и сами файлы с диска).
 // purchase_branch_shares / purchase_cancellations / purchase_transfers удалятся
 // автоматически через ON DELETE CASCADE.
+// Всё в одной транзакции: либо удалилось всё, либо ничего.
 // ---------------------------------------------------------------------------
-router.delete('/:id', requireRole('admin', 'financier'), async (req, res) => {
-  const { id } = req.params;
+async function deletePurchasesByIds(ids) {
+  if (!ids.length) return 0;
+
+  const client = await pool.connect();
+  let storedNames = [];
+  let deleted = 0;
+  try {
+    await client.query('BEGIN');
+
+    const docs = await client.query(
+      `SELECT stored_name FROM documents WHERE entity_type = 'purchase' AND entity_id = ANY($1::int[])`,
+      [ids]
+    );
+    storedNames = docs.rows.map((d) => d.stored_name);
+
+    await client.query(
+      `DELETE FROM documents WHERE entity_type = 'purchase' AND entity_id = ANY($1::int[])`,
+      [ids]
+    );
+    const del = await client.query('DELETE FROM purchases WHERE id = ANY($1::int[])', [ids]);
+    deleted = del.rowCount;
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  // Файлы с диска чистим только после успешного COMMIT.
+  for (const name of storedNames) {
+    fs.unlink(path.join(UPLOAD_DIR, name), () => {});
+  }
+  return deleted;
+}
+
+// Массовое удаление. Два режима (admin/financier):
+//   { ids: [1, 2, 3] }                — выбранные закупки;
+//   { year: 2026, quarter: 2 }        — все закупки квартала за год.
+// Важно: объявлен ДО router.delete('/:id'), хотя путь и метод другие — так
+// порядок маршрутов не спутать при будущих правках.
+router.post('/bulk-delete', requireRole('admin', 'financier'), async (req, res) => {
+  const { ids, year, quarter } = req.body || {};
 
   try {
-    const check = await pool.query('SELECT status FROM purchases WHERE id = $1', [id]);
+    let targetIds;
 
-    if (!check.rows[0]) {
+    if (Array.isArray(ids)) {
+      targetIds = [...new Set(ids.map(Number))].filter((n) => Number.isInteger(n) && n > 0);
+      if (targetIds.length === 0) {
+        return res.status(400).json({ status: 'error', message: 'Не выбрано ни одной закупки' });
+      }
+      if (targetIds.length > 5000) {
+        return res.status(400).json({ status: 'error', message: 'Слишком много закупок за один раз' });
+      }
+    } else {
+      const y = Number(year);
+      const q = Number(quarter);
+      if (!Number.isInteger(y) || y < 2000 || y > 2100) {
+        return res.status(400).json({ status: 'error', message: 'Укажите корректный год' });
+      }
+      if (!Number.isInteger(q) || q < 1 || q > 4) {
+        return res.status(400).json({ status: 'error', message: 'Квартал должен быть от 1 до 4' });
+      }
+      const found = await pool.query('SELECT id FROM purchases WHERE year = $1 AND quarter = $2', [y, q]);
+      targetIds = found.rows.map((r) => r.id);
+    }
+
+    const deleted = await deletePurchasesByIds(targetIds);
+    res.json({ status: 'ok', deleted });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+// Удаление одной закупки — в любом статусе (раньше требовалась предварительная отмена).
+router.delete('/:id', requireRole('admin', 'financier'), async (req, res) => {
+  const id = Number(req.params.id);
+  if (!Number.isInteger(id) || id <= 0) {
+    return res.status(400).json({ status: 'error', message: 'Некорректный id' });
+  }
+
+  try {
+    const deleted = await deletePurchasesByIds([id]);
+    if (deleted === 0) {
       return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
     }
-    if (check.rows[0].status !== 'cancelled') {
-      return res.status(400).json({
-        status: 'error',
-        message: 'Удалить можно только отменённую закупку — сначала отмените её',
-      });
-    }
-
-    const docs = await pool.query(
-      `SELECT stored_name FROM documents WHERE entity_type = 'purchase' AND entity_id = $1`,
-      [id]
-    );
-
-    await pool.query(`DELETE FROM documents WHERE entity_type = 'purchase' AND entity_id = $1`, [id]);
-    await pool.query('DELETE FROM purchases WHERE id = $1', [id]);
-
-    for (const doc of docs.rows) {
-      fs.unlink(path.join(UPLOAD_DIR, doc.stored_name), () => {});
-    }
-
     res.json({ status: 'ok' });
   } catch (err) {
     console.error(err);
