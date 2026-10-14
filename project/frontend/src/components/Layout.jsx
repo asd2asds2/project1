@@ -1,4 +1,4 @@
-import { NavLink, Outlet, useNavigate } from "react-router-dom";
+import { NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
 import { useEffect, useState } from "react";
 import { useAuth } from "../context/AuthContext";
 import { useTheme } from "../theme/ThemeContext";
@@ -13,6 +13,7 @@ const PLAN_ITEMS = [
   { quarter: 2, to: "/plan/q/2", label: "2 квартал", icon: "2️⃣" },
   { quarter: 3, to: "/plan/q/3", label: "3 квартал", icon: "3️⃣" },
   { quarter: 4, to: "/plan/q/4", label: "4 квартал", icon: "4️⃣" },
+  { to: "/plan/manual", label: "Ручной план", icon: "✍️" },
 ];
 
 // Событие, которым таблицы закупок оповещаются о переносе строки на филиал
@@ -27,7 +28,14 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const { theme, toggleTheme } = useTheme();
   const navigate = useNavigate();
+  const location = useLocation();
   const [query, setQuery] = useState("");
+
+  // Сбрасываем строку поиска при переходе на любую страницу, кроме поиска
+  // (выбор пункта меню, филиала и т.д.). На странице поиска текст остаётся.
+  useEffect(() => {
+    if (location.pathname !== "/search") setQuery("");
+  }, [location.pathname]);
   const [branches, setBranches] = useState([]);
   const [dropBranchId, setDropBranchId] = useState(null);
   const [dropQuarter, setDropQuarter] = useState(null);

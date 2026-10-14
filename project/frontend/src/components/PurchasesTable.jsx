@@ -171,6 +171,9 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
 
   useEffect(() => { load(); }, [load]);
 
+  // При смене страницы (квартал/год/поиск) локальный фильтр обнуляется.
+  useEffect(() => { setLocalSearch(""); }, [year, quarter, search, pending]);
+
   // Обновляем список после переноса закупки на филиал/квартал перетаскиванием
   // в меню (событие шлёт Layout.jsx после успешного PATCH/POST). Если в
   // событии приехала обновлённая закупка — подставляем её в список сразу же,

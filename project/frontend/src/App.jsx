@@ -9,6 +9,7 @@ import BranchesPage from "./pages/BranchesPage";
 import AnnualPlanPage from "./pages/AnnualPlanPage";
 import QuarterPage from "./pages/QuarterPage";
 import SearchPage from "./pages/SearchPage";
+import ManualPlanPage from "./pages/ManualPlanPage";
 
 function App() {
   return (
@@ -29,6 +30,7 @@ function App() {
               <Route path="branches" element={<BranchesPage />} />
               <Route path="plan/annual" element={<AnnualPlanPage />} />
               <Route path="plan/q/:quarter" element={<QuarterPage />} />
+              <Route path="plan/manual" element={<ManualPlanPage />} />
               <Route path="search" element={<SearchPage />} />
             </Route>
           </Routes>
