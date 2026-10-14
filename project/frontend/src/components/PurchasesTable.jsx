@@ -74,7 +74,15 @@ function rowStyle(p, quarterColor, branchColor) {
     return { background: "var(--surface)", color: "var(--cancelled-text)", textDecoration: "line-through" };
   }
   if (p.status === "unplanned") {
-    return { background: "var(--unplanned-bg)", borderLeft: "3px solid var(--unplanned-border)" };
+    // Внеплан: красная диагональная штриховка поверх заливки строки + толстая
+    // красная полоса слева. Цвет филиала остаётся как подложка (его видно
+    // сквозь штриховку и в точке в колонке «Филиал»), поэтому внеплан
+    // не путается с красными/розовыми цветами филиалов.
+    const base = branchColor ? `${branchColor}26` : "var(--unplanned-bg)";
+    return {
+      background: `repeating-linear-gradient(135deg, rgba(209,55,63,0.28) 0, rgba(209,55,63,0.28) 6px, transparent 6px, transparent 14px), ${base}`,
+      borderLeft: "8px solid var(--unplanned-border)",
+    };
   }
   if (p.source === "branch" && !p.reviewed_at) {
     return { background: "var(--highlight-new-bg)", borderLeft: "3px solid var(--highlight-new-border)" };
@@ -636,7 +644,7 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
 
       <div style={styles.legend}>
         <span><i style={{ ...styles.dot, background: "var(--highlight-new-border)" }} /> новое от филиала — не просмотрено</span>
-        <span><i style={{ ...styles.dot, background: "var(--unplanned-border)" }} /> внеплановая закупка</span>
+        <span><i style={{ ...styles.dot, background: "repeating-linear-gradient(135deg, var(--unplanned-border) 0, var(--unplanned-border) 3px, transparent 3px, transparent 6px)", border: "1px solid var(--unplanned-border)" }} /> внеплановая закупка (штриховка + красная полоса + метка «ВНЕПЛАН»)</span>
         <span><i style={{ ...styles.dot, background: "var(--cancelled-text)" }} /> отменено</span>
         <span>заливка строки — цвет филиала (свой у каждого, меняется на странице «Филиалы»)</span>
         {showQuarterColumn && <span>полоса слева — цвет квартала</span>}
@@ -786,7 +794,13 @@ export default function PurchasesTable({ year = 2026, quarter = null, search = "
                   </td>
                   {wideColumns && <td style={styles.td}>{p.deadline || "—"}</td>}
                   <td style={styles.td}>{p.okpd2 || "—"}</td>
-                  <td style={styles.td}>{statusLabel(p.status)}</td>
+                  <td style={styles.td}>
+                    {p.status === "unplanned" ? (
+                      <span style={styles.unplannedBadge}>ВНЕПЛАН</span>
+                    ) : (
+                      statusLabel(p.status)
+                    )}
+                  </td>
                   <td style={{ ...styles.td, whiteSpace: "nowrap" }}>
                     <div style={styles.actionsRow}>
                       {canEdit && (
@@ -1230,6 +1244,7 @@ const styles = {
   dragHandle: { cursor: "grab", color: "var(--text-muted)", fontSize: 14, userSelect: "none", display: "inline-block", lineHeight: 1 },
   sharesBreakdown: { fontSize: 11, color: "var(--text-secondary)", marginTop: 2, display: "flex", flexDirection: "column", gap: 2 },
   branchTag: { display: "inline-flex", alignItems: "center", gap: 5 },
+  unplannedBadge: { background: "var(--unplanned-border)", color: "#fff", fontWeight: 700, fontSize: 11, letterSpacing: 0.4, borderRadius: 4, padding: "2px 7px", whiteSpace: "nowrap" },
   notesBadge: { marginLeft: 8, fontSize: 11, color: "var(--text-secondary)", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, padding: "1px 7px", whiteSpace: "nowrap" },
   quarterBadge: { fontSize: 12, fontWeight: 700, borderRadius: 10, padding: "2px 9px", whiteSpace: "nowrap" },
   quarterTotalsBar: { marginTop: 10, display: "flex", flexDirection: "column", gap: 4 },
