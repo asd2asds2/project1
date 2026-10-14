@@ -86,7 +86,7 @@ router.get('/summary', async (req, res) => {
 
     // Способы закупки
     const byMethod = await pool.query(
-      `SELECT COALESCE(NULLIF(method, ''), 'Другое') AS method,
+      `SELECT COALESCE(NULLIF(method::text, ''), 'Другое') AS method,
               COALESCE(SUM(amount), 0) AS total, COUNT(*) AS items
        FROM purchases
        WHERE year = $1 AND status <> 'cancelled'
