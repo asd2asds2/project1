@@ -3,8 +3,9 @@ import { Link } from "react-router-dom";
 import { apiFetch } from "../api";
 import { useAuth } from "../context/AuthContext";
 import { colorForBranchId, BRANCH_PALETTE } from "../theme/branchPalette";
+import NoYearNotice from "../components/NoYearNotice";
+import { useYear } from "../context/YearContext";
 
-const YEAR = 2026;
 const MONTHS = ["Янв", "Фев", "Мар", "Апр", "Май", "Июн", "Июл", "Авг", "Сен", "Окт", "Ноя", "Дек"];
 
 function fmtMoney(n) {
@@ -419,7 +420,7 @@ function MethodChart({ items, total }) {
   );
 }
 
-export default function HomePage() {
+function HomeDashboard({ year: YEAR }) {
   const { user } = useAuth();
   const canReview = user?.role === "admin" || user?.role === "financier";
   const [summary, setSummary] = useState(null);
@@ -787,3 +788,10 @@ const styles = {
   barFill: { height: "100%", background: "linear-gradient(90deg, var(--accent), var(--accent-soft))", borderRadius: 3, transition: "width .8s cubic-bezier(.2,.8,.2,1)" },
   planEditButton: { border: "none", background: "none", cursor: "pointer", fontSize: 12, padding: 0, marginLeft: 6, lineHeight: 1 },
 };
+
+export default function HomePage() {
+  const { year } = useYear();
+  if (!year) return <NoYearNotice />;
+  // key — чтобы при смене года состояние дашборда сбрасывалось и данные грузились заново
+  return <HomeDashboard key={year} year={year} />;
+}

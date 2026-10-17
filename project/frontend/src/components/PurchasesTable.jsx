@@ -111,10 +111,10 @@ function branchColorForRow(p, branches) {
   return null;
 }
 
-// year=2026 фикс (можно вынести в проп, если понадобятся другие годы)
+// year приходит из выбранного года плана (YearContext)
 // quarter: число 1-4, null — все кварталы (годовой план / поиск)
 // search: строка для серверного поиска (используется на странице поиска)
-export default function PurchasesTable({ year = 2026, quarter = null, search = "", pending = false, showQuarterColumn = false, title }) {
+export default function PurchasesTable({ year = new Date().getFullYear(), quarter = null, search = "", pending = false, showQuarterColumn = false, title }) {
   const { user } = useAuth();
   const canEdit = user?.role === "admin" || user?.role === "financier" || user?.role === "branch_editor";
   const canReview = user?.role === "admin" || user?.role === "financier";

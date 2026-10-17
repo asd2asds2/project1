@@ -1,12 +1,18 @@
 import PurchasesTable from "../components/PurchasesTable";
+import NoYearNotice from "../components/NoYearNotice";
+import { useYear } from "../context/YearContext";
 
 export default function AnnualPlanPage() {
+  const { year } = useYear();
+  if (!year) return <NoYearNotice />;
+
   return (
     <PurchasesTable
-      year={2026}
+      key={year}
+      year={year}
       quarter={null}
       showQuarterColumn
-      title=" 1Z Годовой план 2026 (Центр + филиалы)"
+      title={`Годовой план ${year} (Центр + филиалы)`}
     />
   );
 }

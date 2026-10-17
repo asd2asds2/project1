@@ -1,20 +1,23 @@
 import { NavLink, Outlet, useNavigate, useLocation } from "react-router-dom";
-import { useEffect, useState } from "react";
+import { Fragment, useEffect, useState } from "react";
 import { useAuth } from "../context/AuthContext";
 import { useTheme } from "../theme/ThemeContext";
 import { apiFetch } from "../api";
 import { colorForBranchId } from "../theme/branchPalette";
+import { useYear } from "../context/YearContext";
+import CreateYearModal from "./CreateYearModal";
 
-// Порядок пунктов планов: сначала годовой план целиком, потом кварталы по
-// порядку — как попросили.
-const PLAN_ITEMS = [
-  { to: "/plan/annual", label: "Годовой план 2026", icon: "🗓️" },
-  { quarter: 1, to: "/plan/q/1", label: "1 квартал", icon: "1️⃣" },
-  { quarter: 2, to: "/plan/q/2", label: "2 квартал", icon: "2️⃣" },
-  { quarter: 3, to: "/plan/q/3", label: "3 квартал", icon: "3️⃣" },
-  { quarter: 4, to: "/plan/q/4", label: "4 квартал", icon: "4️⃣" },
-  { to: "/plan/manual", label: "Ручной план", icon: "✍️" },
-];
+// Пункты меню строятся из шаблона выбранного года (таблицы plan_year_items):
+// Главная, Филиалы, Годовой план, 1–4 квартал.
+function routeFor(item) {
+  switch (item.kind) {
+    case "home": return "/";
+    case "branches": return "/branches";
+    case "annual": return "/plan/annual";
+    case "quarter": return `/plan/q/${item.quarter}`;
+    default: return "/";
+  }
+}
 
 // Событие, которым таблицы закупок оповещаются о переносе строки на филиал
 // или в другой квартал (см. PurchasesTable.jsx), чтобы обновить данные без
@@ -30,6 +33,8 @@ export default function Layout() {
   const navigate = useNavigate();
   const location = useLocation();
   const [query, setQuery] = useState("");
+  const { years, year, setYear, items, createOpen, setCreateOpen } = useYear();
+  const isAdmin = user?.role === "admin";
 
   // Сбрасываем строку поиска при переходе на любую страницу, кроме поиска
   // (выбор пункта меню, филиала и т.д.). На странице поиска текст остаётся.
@@ -132,6 +137,19 @@ export default function Layout() {
         </form>
 
         <div style={styles.topbarRight}>
+          {years.length > 0 && (
+            <label style={styles.yearBox} title="Год плана">
+              <span style={styles.yearLabel}>Год</span>
+              <select value={year ?? ""} onChange={(e) => { setYear(Number(e.target.value)); navigate("/"); }} style={styles.yearSelect}>
+                {years.map((y) => <option key={y.year} value={y.year}>{y.year}</option>)}
+              </select>
+            </label>
+          )}
+          {isAdmin && (
+            <button type="button" onClick={() => setCreateOpen(true)} style={styles.iconButton} title="Создать план на год">
+              ＋ Новый год
+            </button>
+          )}
           <button type="button" onClick={toggleTheme} style={styles.iconButton} title="Сменить тему">
             {theme === "dark" ? "☀️ Светлая" : "🌙 Тёмная"}
           </button>
@@ -145,52 +163,42 @@ export default function Layout() {
       {/* Меню — горизонтальной полосой прямо под шапкой, на всю ширину. */}
       <nav style={styles.menuBar}>
         <div style={styles.menuGroup}>
-          <NavLink
-            to="/"
-            end
-            style={({ isActive }) => ({ ...styles.menuLink, ...(isActive ? styles.menuLinkActive : {}) })}
-          >
-            <span style={styles.menuIcon}>📊</span>
-            <span>Главная</span>
-          </NavLink>
-          <NavLink
-            to="/branches"
-            style={({ isActive }) => ({ ...styles.menuLink, ...(isActive ? styles.menuLinkActive : {}) })}
-          >
-            <span style={styles.menuIcon}>🏬</span>
-            <span>Филиалы</span>
-          </NavLink>
-
-          <span style={styles.menuDivider} />
-
-          {PLAN_ITEMS.map((item) =>
-            item.quarter ? (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                onDragOver={(e) => onDragOverDropZone(e, setDropQuarter, item.quarter)}
-                onDragLeave={() => setDropQuarter((cur) => (cur === item.quarter ? null : cur))}
-                onDrop={(e) => onQuarterDrop(e, item)}
-                style={({ isActive }) => ({
-                  ...styles.menuLink,
-                  ...(isActive ? styles.menuLinkActive : {}),
-                  ...(dropQuarter === item.quarter ? styles.menuLinkDropActive : {}),
-                })}
-              >
-                <span style={styles.menuIcon}>{item.icon}</span>
-                <span>{item.label}</span>
-              </NavLink>
-            ) : (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                style={({ isActive }) => ({ ...styles.menuLink, ...(isActive ? styles.menuLinkActive : {}) })}
-              >
-                <span style={styles.menuIcon}>{item.icon}</span>
-                <span>{item.label}</span>
-              </NavLink>
-            )
+          {items.length === 0 && (
+            <span style={styles.menuEmpty}>
+              {isAdmin ? "Нажмите «＋ Новый год», чтобы создать план" : "План ещё не создан"}
+            </span>
           )}
+          {items.map((item, idx) => {
+            const to = routeFor(item);
+            const isQuarter = item.kind === "quarter";
+            const startsPlans =
+              (item.kind === "annual" || isQuarter) &&
+              idx > 0 && items[idx - 1].kind !== "annual" && items[idx - 1].kind !== "quarter";
+            return (
+              <Fragment key={`${item.kind}-${item.quarter ?? ""}-${idx}`}>
+                {startsPlans && <span style={styles.menuDivider} />}
+                <NavLink
+                  to={to}
+                  end={item.kind === "home"}
+                  {...(isQuarter
+                    ? {
+                        onDragOver: (e) => onDragOverDropZone(e, setDropQuarter, item.quarter),
+                        onDragLeave: () => setDropQuarter((cur) => (cur === item.quarter ? null : cur)),
+                        onDrop: (e) => onQuarterDrop(e, item),
+                      }
+                    : {})}
+                  style={({ isActive }) => ({
+                    ...styles.menuLink,
+                    ...(isActive ? styles.menuLinkActive : {}),
+                    ...(isQuarter && dropQuarter === item.quarter ? styles.menuLinkDropActive : {}),
+                  })}
+                >
+                  <span style={styles.menuIcon}>{item.icon}</span>
+                  <span>{item.label}</span>
+                </NavLink>
+              </Fragment>
+            );
+          })}
         </div>
 
         {branches.length > 0 && (
@@ -216,6 +224,7 @@ export default function Layout() {
       </nav>
 
       {dropMessage && <div style={styles.dropToast}>{dropMessage}</div>}
+      {createOpen && <CreateYearModal onClose={() => setCreateOpen(false)} />}
 
       <main style={styles.content}>
         <Outlet />
@@ -255,6 +264,18 @@ const styles = {
     padding: "7px 10px",
     cursor: "pointer",
   },
+  yearBox: { display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: "var(--text-secondary)" },
+  yearLabel: { textTransform: "uppercase", letterSpacing: 0.5, fontSize: 11 },
+  yearSelect: {
+    border: "1px solid var(--border)",
+    background: "var(--surface-2)",
+    color: "var(--text)",
+    borderRadius: "var(--radius-sm)",
+    padding: "6px 8px",
+    fontWeight: 600,
+    cursor: "pointer",
+  },
+  menuEmpty: { color: "var(--text-muted)", fontSize: 13, padding: "7px 4px" },
   userName: { color: "var(--text-secondary)", fontSize: 13 },
   logoutButton: {
     border: "none",
