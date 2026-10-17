@@ -4,6 +4,8 @@ import { useAuth } from "../context/AuthContext";
 import DocumentsModal, { fileIcon, fmtSize } from "./DocumentsModal";
 import ImportExcelModal from "./ImportExcelModal";
 import ContextMenu from "./ContextMenu";
+import DateInput from "./DateInput";
+import { isoToRu } from "../utils/date";
 import { colorForBranchId } from "../theme/branchPalette";
 
 const METHODS = ["ЕП", "ЭА", "ЗК", "Р", "Конкурс", "Другое"];
@@ -24,7 +26,7 @@ const QUARTER_COLORS = {
 };
 
 // Дата + N рабочих дней (суббота и воскресенье не считаются).
-// iso — строка "YYYY-MM-DD" из <input type="date">. Считаем в UTC, чтобы
+// iso — строка "YYYY-MM-DD" (значение DateInput, показывается как ДД.ММ.ГГГГ). Считаем в UTC, чтобы
 // часовой пояс браузера не сдвинул дату на сутки. Праздничные дни не учитываем.
 function addWorkdays(iso, n) {
   if (!iso) return "";
@@ -762,8 +764,8 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
                   {wideColumns && <td style={styles.td}>{p.product_group || "—"}</td>}
                   {wideColumns && <td style={styles.td}>{p.method || "—"}</td>}
                   {wideColumns && <td style={styles.td}>{p.justification || "—"}</td>}
-                  {wideColumns && <td style={styles.td}>{p.tz_date ? p.tz_date.slice(0, 10) : "—"}</td>}
-                  {wideColumns && <td style={styles.td}>{p.notice_date ? p.notice_date.slice(0, 10) : "—"}</td>}
+                  {wideColumns && <td style={styles.td}>{isoToRu(p.tz_date) || "—"}</td>}
+                  {wideColumns && <td style={styles.td}>{isoToRu(p.notice_date) || "—"}</td>}
                   <td style={{ ...styles.td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtMoney(p.amount)}</td>
                   <td style={styles.td}>
                     {p.shares && p.shares.length > 1 ? (
@@ -1172,11 +1174,9 @@ function EditModal({ form, setForm, branches, isNew, onCancel, onSave }) {
 
           <label style={styles.label}>
             Дата подачи ТЗ
-            <input
-              type="date"
+            <DateInput
               value={form.tz_date}
-              onChange={(e) => {
-                const v = e.target.value;
+              onChange={(v) => {
                 // Дата размещения извещения = дата подачи ТЗ + 5 рабочих дней (без выходных).
                 setForm((f) => ({ ...f, tz_date: v, notice_date: v ? addWorkdays(v, 5) : f.notice_date }));
               }}
@@ -1186,7 +1186,7 @@ function EditModal({ form, setForm, branches, isNew, onCancel, onSave }) {
 
           <label style={styles.label}>
             Дата размещения извещения
-            <input type="date" value={form.notice_date} onChange={(e) => set("notice_date", e.target.value)} style={styles.input} />
+            <DateInput value={form.notice_date} onChange={(v) => set("notice_date", v)} style={styles.input} />
             <span style={{ fontSize: 11.5, color: "var(--text-muted)", fontWeight: 400 }}>
               считается сама: дата подачи ТЗ + 5 рабочих дней, можно поправить вручную
             </span>
