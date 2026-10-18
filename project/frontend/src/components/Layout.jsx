@@ -368,5 +368,5 @@ const styles = {
     fontSize: 12.5,
   },
 
-  content: { flex: 1, overflow: "auto", padding: 24 },
+  content: { flex: 1, overflow: "auto", padding: "16px 12px" },
 };

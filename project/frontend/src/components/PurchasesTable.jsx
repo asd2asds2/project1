@@ -683,18 +683,18 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
           <thead>
             <tr>
               {canReview && (
-                <th style={{ ...styles.th, width: 28 }}>
+                <th style={{ ...styles.th, width: 24, padding: "7px 4px" }}>
                   <input type="checkbox" checked={allSelected} onChange={toggleSelectAll} title="Выбрать все на странице" />
                 </th>
               )}
-              {canReorder && <th style={{ ...styles.th, width: 28 }}></th>}
-              <th style={styles.th}>№ п/п</th>
+              {canReorder && <th style={{ ...styles.th, width: 20, padding: "7px 2px" }}></th>}
+              <th style={{ ...styles.th, whiteSpace: "nowrap" }}>№ п/п</th>
               {showQuarterColumn && <th style={styles.th}>Кв.</th>}
               <th style={styles.th}>Наименование закупки (предмет договора)</th>
               {wideColumns && <th style={styles.th}>Группа продукции (АСГОР)</th>}
               {wideColumns && <th style={styles.th}>Способ размещения закупки</th>}
               {wideColumns && <th style={styles.th}>Обоснование закупки у ЕП</th>}
-              {wideColumns && <th style={styles.th}>Плановая дата подачи ТЗ/спецификации</th>}
+              {wideColumns && <th style={styles.th}>Плановая дата подачи ТЗ / спецификации</th>}
               {wideColumns && <th style={styles.th}>Плановая дата размещения извещения</th>}
               <th style={styles.th}>НМЦ договора, руб.</th>
               <th style={styles.th}>Потребители</th>
@@ -741,7 +741,7 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
                       <span style={styles.dragHandle} className="drag-handle">⋮⋮</span>
                     </td>
                   )}
-                  <td style={styles.td}>{p.item_no ?? "—"}</td>
+                  <td style={{ ...styles.td, ...styles.tdNowrap }}>{p.item_no ?? "—"}</td>
                   {showQuarterColumn && (
                     <td style={styles.td}>
                       <span
@@ -755,19 +755,19 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
                       </span>
                     </td>
                   )}
-                  <td style={styles.td}>
+                  <td style={{ ...styles.td, ...styles.tdName }}>
                     {p.name}
                     {Number(p.documents_count) > 0 && (
                       <span style={styles.notesBadge} title={`Прикреплено файлов служебок: ${p.documents_count}`}>📎 {p.documents_count}</span>
                     )}
                   </td>
-                  {wideColumns && <td style={styles.td}>{p.product_group || "—"}</td>}
-                  {wideColumns && <td style={styles.td}>{p.method || "—"}</td>}
-                  {wideColumns && <td style={styles.td}>{p.justification || "—"}</td>}
-                  {wideColumns && <td style={styles.td}>{isoToRu(p.tz_date) || "—"}</td>}
-                  {wideColumns && <td style={styles.td}>{isoToRu(p.notice_date) || "—"}</td>}
-                  <td style={{ ...styles.td, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtMoney(p.amount)}</td>
-                  <td style={styles.td}>
+                  {wideColumns && <td style={{ ...styles.td, ...styles.tdText }}>{p.product_group || "—"}</td>}
+                  {wideColumns && <td style={{ ...styles.td, ...styles.tdNowrap }}>{p.method || "—"}</td>}
+                  {wideColumns && <td style={{ ...styles.td, ...styles.tdText }}>{p.justification || "—"}</td>}
+                  {wideColumns && <td style={{ ...styles.td, ...styles.tdNowrap }}>{isoToRu(p.tz_date) || "—"}</td>}
+                  {wideColumns && <td style={{ ...styles.td, ...styles.tdNowrap }}>{isoToRu(p.notice_date) || "—"}</td>}
+                  <td style={{ ...styles.td, ...styles.tdNowrap, textAlign: "right", fontVariantNumeric: "tabular-nums" }}>{fmtMoney(p.amount)}</td>
+                  <td style={{ ...styles.td, ...styles.tdConsumers }}>
                     {p.shares && p.shares.length > 1 ? (
                       <div>
                         <div>{p.shares.length} филиала(ов)</div>
@@ -794,9 +794,9 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
                       p.branch_name || "—"
                     )}
                   </td>
-                  {wideColumns && <td style={styles.td}>{p.deadline || "—"}</td>}
-                  <td style={styles.td}>{p.okpd2 || "—"}</td>
-                  <td style={styles.td}>
+                  {wideColumns && <td style={{ ...styles.td, ...styles.tdNowrap }}>{p.deadline || "—"}</td>}
+                  <td style={{ ...styles.td, ...styles.tdNowrap }}>{p.okpd2 || "—"}</td>
+                  <td style={{ ...styles.td, ...styles.tdNowrap }}>
                     {p.status === "unplanned" ? (
                       <span style={styles.unplannedBadge}>ВНЕПЛАН</span>
                     ) : (
@@ -1238,11 +1238,15 @@ const styles = {
   dot: { display: "inline-block", width: 9, height: 9, borderRadius: "50%", marginRight: 5 },
   tableWrap: { background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius)", overflow: "auto", boxShadow: "var(--shadow-sm)", WebkitOverflowScrolling: "touch", overscrollBehaviorX: "contain" },
   topScrollBar: { overflowX: "auto", overflowY: "hidden", marginBottom: 6, WebkitOverflowScrolling: "touch" },
-  th: { textAlign: "left", padding: "10px 12px", borderBottom: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: 12, textTransform: "uppercase", letterSpacing: 0.3, whiteSpace: "nowrap" },
-  td: { padding: "9px 12px", borderBottom: "1px solid var(--border)", fontSize: 13.5, color: "var(--text)" },
-  dragHandleCell: { padding: "9px 4px", textAlign: "center" },
+  th: { textAlign: "left", verticalAlign: "bottom", padding: "7px 6px", borderBottom: "1px solid var(--border)", color: "var(--text-secondary)", fontSize: 10.5, lineHeight: 1.25, textTransform: "uppercase", letterSpacing: 0.1 },
+  td: { padding: "6px 6px", borderBottom: "1px solid var(--border)", fontSize: 12, lineHeight: 1.3, color: "var(--text)" },
+  tdNowrap: { whiteSpace: "nowrap" },
+  tdName: { minWidth: 170 },
+  tdText: { maxWidth: 130 },
+  tdConsumers: { minWidth: 120 },
+  dragHandleCell: { padding: "6px 2px", textAlign: "center" },
   dragHandle: { cursor: "grab", color: "var(--text-muted)", fontSize: 14, userSelect: "none", display: "inline-block", lineHeight: 1 },
-  sharesBreakdown: { fontSize: 11, color: "var(--text-secondary)", marginTop: 2, display: "flex", flexDirection: "column", gap: 2 },
+  sharesBreakdown: { fontSize: 10.5, color: "var(--text-secondary)", marginTop: 2, display: "flex", flexDirection: "column", gap: 2 },
   branchTag: { display: "inline-flex", alignItems: "center", gap: 5 },
   unplannedBadge: { background: "var(--unplanned-border)", color: "#fff", fontWeight: 700, fontSize: 11, letterSpacing: 0.4, borderRadius: 4, padding: "2px 7px", whiteSpace: "nowrap" },
   notesBadge: { marginLeft: 8, fontSize: 11, color: "var(--text-secondary)", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, padding: "1px 7px", whiteSpace: "nowrap" },
@@ -1258,7 +1262,7 @@ const styles = {
     color: "var(--text-secondary)",
     cursor: "pointer",
     fontSize: 13,
-    padding: "5px 6px",
+    padding: "2px 3px",
     borderRadius: "var(--radius-sm)",
     lineHeight: 1,
   },
