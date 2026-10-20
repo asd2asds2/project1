@@ -137,6 +137,8 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
   const [undoCount, setUndoCount] = useState(undoStack.length);
   // Дата размещения извещения считается сама (ТЗ + 5 раб. дней), пока её не поправили вручную.
   const autoNotice = useRef(true);
+  // Сортировка по клику на заголовок колонки: { key, dir } или null (порядок плана).
+  const [sort, setSort] = useState(null);
   const [branches, setBranches] = useState([]);
   // Ручной план (вводится руками, отдельно от фактических сумм закупок):
   // ключи "0" (план на год) .. "4" (план на квартал). Приходит с бэка всегда
@@ -228,7 +230,41 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
   // не совпадает с реальным порядком в квартале, и перетаскивание запутает.
   // На годовом плане (quarter=null) строки разных кварталов идут подряд, поэтому
   // там строку можно двигать только внутри её квартала (см. onRowDragOver/Drop).
-  const canReorder = canEdit && !effectiveSearch && !pending;
+  // При включённой сортировке по колонке перетаскивание строк отключаем: видимый порядок
+  // не совпадает с порядком плана, и перетаскивание запутало бы.
+  const canReorder = canEdit && !effectiveSearch && !pending && !sort;
+
+  const SORT_VALUE = {
+    okpd2: (p) => p.okpd2 || "",
+    branch: (p) => p.branch_name && p.branch_name !== "—" ? p.branch_name : "",
+  };
+  const shownItems = useMemo(() => {
+    if (!sort) return items;
+    const val = SORT_VALUE[sort.key];
+    const mul = sort.dir === "desc" ? -1 : 1;
+    return [...items].sort((a, b) => {
+      const x = String(val(a)).trim(), y = String(val(b)).trim();
+      if (!x && !y) return 0;
+      if (!x) return 1; // пустые всегда в конце
+      if (!y) return -1;
+      return mul * x.localeCompare(y, "ru", { numeric: true, sensitivity: "base" });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [items, sort]);
+
+  // клик: по возрастанию → по убыванию → сброс
+  function toggleSort(key) {
+    setSort((prev) => (!prev || prev.key !== key ? { key, dir: "asc" } : prev.dir === "asc" ? { key, dir: "desc" } : null));
+  }
+  const sortHead = (key, label) => (
+    <th
+      style={{ ...styles.th, cursor: "pointer", userSelect: "none" }}
+      onClick={() => toggleSort(key)}
+      title="Нажмите, чтобы сортировать (по возрастанию → по убыванию → сброс)"
+    >
+      {label} {sort?.key === key ? (sort.dir === "asc" ? "▲" : "▼") : <span style={{ opacity: 0.35 }}>⇅</span>}
+    </th>
+  );
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -795,9 +831,9 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
               {wideColumns && <th style={styles.th}>Плановая дата подачи ТЗ / спецификации</th>}
               {wideColumns && <th style={styles.th}>Плановая дата размещения извещения</th>}
               <th style={styles.th}>НМЦ договора, руб.</th>
-              <th style={styles.th}>Потребители</th>
+              {sortHead("branch", "Потребители")}
               {wideColumns && <th style={styles.th}>Срок исполнения договора</th>}
-              <th style={styles.th}>Код по ОКПД 2</th>
+              {sortHead("okpd2", "Код по ОКПД 2")}
               <th style={styles.th}>Статус</th>
               <th style={styles.th}></th>
             </tr>
@@ -809,7 +845,7 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
             {!loading && items.length === 0 && (
               <tr><td colSpan={columnCount} style={styles.emptyCell}>Пока нет закупок</td></tr>
             )}
-            {!loading && items.map((p) => {
+            {!loading && shownItems.map((p) => {
               const isDragging = dragId === p.id;
               const isDropTarget = overId === p.id && dragId !== null && dragId !== p.id;
               return (
