@@ -16,6 +16,15 @@ const EMPTY_FORM = {
   shares: [{ ...EMPTY_SHARE }],
 };
 
+// --- Откат действий -----------------------------------------------------------
+// Стек живёт на уровне модуля, а не компонента: при переходе между страницами
+// (квартал → годовой план) история отката не теряется. После перезагрузки страницы — очищается.
+// В записи: before — снимки закупок ДО действия (их возвращает POST /api/purchases/restore-snapshot),
+// created — id закупок, созданных действием (при откате удаляются).
+const UNDO_LIMIT = 30;
+const undoStack = [];
+const snap = (p) => JSON.parse(JSON.stringify(p));
+
 // Цвет-метка квартала (для бейджа в колонке "Кв." на годовом плане) —
 // чисто визуальная подсказка, к статусу закупки отношения не имеет.
 const QUARTER_COLORS = {
@@ -123,6 +132,11 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
   const canImport = user?.role === "admin" || user?.role === "financier";
 
   const [items, setItems] = useState([]);
+  const itemsRef = useRef([]);
+  itemsRef.current = items;
+  const [undoCount, setUndoCount] = useState(undoStack.length);
+  // Дата размещения извещения считается сама (ТЗ + 5 раб. дней), пока её не поправили вручную.
+  const autoNotice = useRef(true);
   const [branches, setBranches] = useState([]);
   // Ручной план (вводится руками, отдельно от фактических сумм закупок):
   // ключи "0" (план на год) .. "4" (план на квартал). Приходит с бэка всегда
@@ -265,6 +279,11 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
   useEffect(() => {
     function onChanged(e) {
       const updated = e.detail?.purchase;
+      // Перенос закупки перетаскиванием в боковое меню (Layout.jsx) — тоже можно откатить
+      if (updated) {
+        const prevItem = itemsRef.current.find((p) => p.id === updated.id);
+        if (prevItem) pushUndo("Перенос закупки", { before: [prevItem] });
+      }
       if (updated && Number(updated.year) === Number(year)) {
         setItems((prev) => {
           const idx = prev.findIndex((p) => p.id === updated.id);
@@ -316,8 +335,54 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
     });
   }, [items]);
 
+  function pushUndo(label, { before = [], created = [] }) {
+    undoStack.push({ label, before: before.map(snap), created });
+    if (undoStack.length > UNDO_LIMIT) undoStack.shift();
+    setUndoCount(undoStack.length);
+  }
+
+  const findItem = (id) => itemsRef.current.find((p) => p.id === Number(id));
+
+  async function undo() {
+    const entry = undoStack.pop();
+    setUndoCount(undoStack.length);
+    if (!entry) return;
+    try {
+      if (entry.created.length > 0) {
+        await apiFetch(`/api/purchases/bulk-delete`, { method: "POST", body: JSON.stringify({ ids: entry.created }) });
+      }
+      if (entry.before.length > 0) {
+        await apiFetch(`/api/purchases/restore-snapshot`, { method: "POST", body: JSON.stringify({ purchases: entry.before }) });
+      }
+      setError("");
+      load();
+    } catch (err) {
+      undoStack.push(entry); // не получилось — оставляем действие в истории
+      setUndoCount(undoStack.length);
+      setError(err.message);
+    }
+  }
+
+  // Ctrl+Z (в т.ч. на русской раскладке) вне полей ввода и без открытой формы
+  const undoRef = useRef(undo);
+  undoRef.current = undo;
+  useEffect(() => {
+    function onKey(e) {
+      if (!(e.ctrlKey || e.metaKey) || e.shiftKey || e.code !== "KeyZ") return;
+      const t = e.target;
+      if (t && (t.tagName === "INPUT" || t.tagName === "TEXTAREA" || t.tagName === "SELECT" || t.isContentEditable)) return;
+      if (!canEdit || editing !== null || filesFor || importing) return;
+      e.preventDefault();
+      undoRef.current();
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [canEdit, editing, filesFor, importing]);
+
   function startEdit(p) {
     setEditing(p.id);
+    autoNotice.current =
+      !p.notice_date || !p.tz_date || String(p.notice_date).slice(0, 10) === addWorkdays(String(p.tz_date).slice(0, 10), 5);
     const shares =
       p.shares && p.shares.length > 0
         ? p.shares.map((s) => ({ branch_id: s.branch_id, amount: s.amount }))
@@ -325,13 +390,14 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
     setForm({
       quarter: p.quarter, name: p.name, product_group: p.product_group || "",
       method: p.method || "ЕП", justification: p.justification || "",
-      tz_date: p.tz_date ? p.tz_date.slice(0, 10) : "", notice_date: p.notice_date ? p.notice_date.slice(0, 10) : "",
+      tz_date: p.tz_date ? String(p.tz_date).slice(0, 10) : "", notice_date: p.notice_date ? String(p.notice_date).slice(0, 10) : "",
       deadline: p.deadline || "", okpd2: p.okpd2 || "", comment: p.comment || "",
       shares,
     });
   }
 
   function startNew() {
+    autoNotice.current = true;
     setEditing("new");
     setForm({ ...EMPTY_FORM, quarter: quarter || 1, shares: [{ branch_id: branches[0]?.id || "", amount: "" }] });
   }
@@ -351,9 +417,12 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
 
     try {
       if (editing === "new") {
-        await apiFetch(`/api/purchases`, { method: "POST", body: JSON.stringify({ ...payload, year }) });
+        const res = await apiFetch(`/api/purchases`, { method: "POST", body: JSON.stringify({ ...payload, year }) });
+        if (res.purchase?.id) pushUndo("Добавление закупки", { created: [res.purchase.id] });
       } else {
+        const before = findItem(editing);
         await apiFetch(`/api/purchases/${editing}`, { method: "PUT", body: JSON.stringify(payload) });
+        if (before) pushUndo("Изменение закупки", { before: [before] });
       }
       setEditing(null);
       load();
@@ -364,7 +433,9 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
 
   async function review(id) {
     try {
+      const before = findItem(id);
       await apiFetch(`/api/purchases/${id}/review`, { method: "POST" });
+      if (before) pushUndo("Отметка «просмотрено»", { before: [before] });
       load();
     } catch (err) {
       setError(err.message);
@@ -375,7 +446,9 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
     const to = prompt("Перенести в какой квартал? (1-4)");
     if (!to) return;
     try {
+      const before = findItem(id);
       await apiFetch(`/api/purchases/${id}/transfer`, { method: "POST", body: JSON.stringify({ to_quarter: Number(to) }) });
+      if (before) pushUndo("Перенос в другой квартал", { before: [before] });
       load();
     } catch (err) {
       setError(err.message);
@@ -386,7 +459,9 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
     const reason = prompt("Причина отмены:");
     if (!reason) return;
     try {
+      const before = findItem(id);
       await apiFetch(`/api/purchases/${id}/cancel`, { method: "POST", body: JSON.stringify({ reason }) });
+      if (before) pushUndo("Отмена закупки", { before: [before] });
       load();
     } catch (err) {
       setError(err.message);
@@ -395,7 +470,9 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
 
   async function restoreItem(id) {
     try {
+      const before = findItem(id);
       await apiFetch(`/api/purchases/${id}/restore`, { method: "POST" });
+      if (before) pushUndo("Возврат из отмены", { before: [before] });
       load();
     } catch (err) {
       setError(err.message);
@@ -403,10 +480,12 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
   }
 
   async function deleteItem(p) {
-    const files = Number(p.documents_count) > 0 ? ` Вместе с ней удалятся прикреплённые файлы (${p.documents_count}).` : "";
-    if (!confirm(`Удалить закупку «${p.name}» безвозвратно?${files} Это действие нельзя отменить.`)) return;
+    const files = Number(p.documents_count) > 0 ? ` Прикреплённые файлы (${p.documents_count}) удалятся навсегда.` : "";
+    if (!confirm(`Удалить закупку «${p.name}»?${files} Саму закупку можно вернуть кнопкой «Отменить действие» (заметки и файлы не вернутся).`)) return;
     try {
+      const before = snap(p);
       await apiFetch(`/api/purchases/${p.id}`, { method: "DELETE" });
+      pushUndo("Удаление закупки", { before: [before] });
       load();
     } catch (err) {
       setError(err.message);
@@ -432,9 +511,11 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
   async function deleteSelected() {
     const ids = [...selected];
     if (ids.length === 0) return;
-    if (!confirm(`Удалить выбранные закупки (${ids.length} шт.) безвозвратно? Прикреплённые файлы тоже удалятся. Это действие нельзя отменить.`)) return;
+    if (!confirm(`Удалить выбранные закупки (${ids.length} шт.)? Сами закупки можно вернуть кнопкой «Отменить действие», а заметки и прикреплённые файлы удалятся навсегда.`)) return;
     try {
+      const before = ids.map(findItem).filter(Boolean);
       const res = await apiFetch(`/api/purchases/bulk-delete`, { method: "POST", body: JSON.stringify({ ids }) });
+      if (before.length > 0) pushUndo(`Удаление закупок (${before.length})`, { before });
       setSelected(new Set());
       setError("");
       load();
@@ -458,8 +539,8 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
       }
     }
     const typed = prompt(
-      `Будут безвозвратно удалены ВСЕ закупки ${q} квартала ${year} года вместе с прикреплёнными файлами. ` +
-      `Это действие нельзя отменить.\n\nДля подтверждения введите слово УДАЛИТЬ:`
+      `Будут удалены ВСЕ закупки ${q} квартала ${year} года, а прикреплённые файлы и заметки — навсегда. ` +
+      `Сами закупки можно вернуть кнопкой «Отменить действие».\n\nДля подтверждения введите слово УДАЛИТЬ:`
     );
     if (typed === null) return;
     if (typed.trim().toUpperCase() !== "УДАЛИТЬ") {
@@ -467,7 +548,10 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
       return;
     }
     try {
+      // Снимок берём с сервера, а не из таблицы: на странице может быть включён локальный фильтр
+      const all = await apiFetch(`/api/purchases?year=${year}&quarter=${q}`);
       const res = await apiFetch(`/api/purchases/bulk-delete`, { method: "POST", body: JSON.stringify({ year, quarter: q }) });
+      if (all.purchases.length > 0) pushUndo(`Удаление ${q} квартала`, { before: all.purchases });
       setSelected(new Set());
       setError("");
       load();
@@ -498,12 +582,13 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
 
   // --- Перетаскивание строк (drag-and-drop) ---------------------------------
 
-  async function persistOrder(orderedIds, q) {
+  async function persistOrder(orderedIds, q, beforeGroup) {
     try {
       await apiFetch(`/api/purchases/reorder`, {
         method: "PATCH",
         body: JSON.stringify({ year, quarter: q, order: orderedIds }),
       });
+      if (beforeGroup?.length) pushUndo("Изменение порядка строк", { before: beforeGroup });
     } catch (err) {
       setError(err.message);
       load();
@@ -547,6 +632,7 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
     // Берём строки только этого квартала в их текущем порядке, двигаем одну
     // из них и кладём обратно на те же места среди остальных кварталов.
     const group = items.filter((p) => Number(p.quarter) === q);
+    const beforeGroup = group.map(snap);
     const fromIdx = group.findIndex((p) => p.id === dragId);
     const toIdx = group.findIndex((p) => p.id === id);
     const [m] = group.splice(fromIdx, 1);
@@ -555,7 +641,7 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
     let k = 0;
     const next = items.map((p) => (Number(p.quarter) === q ? renumbered[k++] : p));
     setItems(next);
-    persistOrder(renumbered.map((p) => p.id), q);
+    persistOrder(renumbered.map((p) => p.id), q, beforeGroup);
     setDragId(null);
     setOverId(null);
   }
@@ -615,6 +701,18 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
               onChange={(e) => setLocalSearch(e.target.value)}
               style={styles.filterInput}
             />
+          )}
+          {canEdit && (
+            <button
+              type="button"
+              onClick={undo}
+              disabled={undoCount === 0}
+              style={{ ...styles.secondaryButton, ...(undoCount === 0 ? { opacity: 0.5, cursor: "not-allowed" } : {}) }}
+              className="secondary-btn"
+              title={undoCount > 0 ? `Отменить: ${undoStack[undoStack.length - 1].label} (Ctrl+Z)` : "Нет действий для отмены"}
+            >
+              ↶ Отменить действие{undoCount > 0 ? ` (${undoCount})` : ""}
+            </button>
           )}
           <button type="button" onClick={toggleWideColumns} style={styles.secondaryButton} className="secondary-btn">
             {wideColumns ? "Скрыть доп. колонки" : "Показать все колонки"}
@@ -1177,8 +1275,13 @@ function EditModal({ form, setForm, branches, isNew, onCancel, onSave }) {
             <DateInput
               value={form.tz_date}
               onChange={(v) => {
-                // Дата размещения извещения = дата подачи ТЗ + 5 рабочих дней (без выходных).
-                setForm((f) => ({ ...f, tz_date: v, notice_date: v ? addWorkdays(v, 5) : f.notice_date }));
+                // Дата размещения извещения = дата подачи ТЗ + 5 рабочих дней (без выходных) —
+                // но только пока её не поправили вручную (раньше любая правка ТЗ затирала ручную дату).
+                setForm((f) => ({
+                  ...f,
+                  tz_date: v,
+                  notice_date: v && autoNotice.current ? addWorkdays(v, 5) : f.notice_date,
+                }));
               }}
               style={styles.input}
             />
@@ -1186,9 +1289,17 @@ function EditModal({ form, setForm, branches, isNew, onCancel, onSave }) {
 
           <label style={styles.label}>
             Дата размещения извещения
-            <DateInput value={form.notice_date} onChange={(v) => set("notice_date", v)} style={styles.input} />
+            <DateInput
+              value={form.notice_date}
+              onChange={(v) => {
+                // Поправили вручную — больше не пересчитываем; стёрли совсем — снова считаем автоматически
+                autoNotice.current = !v;
+                set("notice_date", v);
+              }}
+              style={styles.input}
+            />
             <span style={{ fontSize: 11.5, color: "var(--text-muted)", fontWeight: 400 }}>
-              считается сама: дата подачи ТЗ + 5 рабочих дней, можно поправить вручную
+              считается сама (дата подачи ТЗ + 5 рабочих дней), пока вы её не поправите вручную
             </span>
           </label>
 

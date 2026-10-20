@@ -680,6 +680,87 @@ async function deletePurchasesByIds(ids) {
   return deleted;
 }
 
+// ---------------------------------------------------------------------------
+// Откат действия (кнопка «Отменить действие» / Ctrl+Z в таблице).
+// Тело: { purchases: [снимок закупки, ...] } — снимки, снятые фронтом ДО действия.
+// Для каждой закупки по id: если она ещё есть — возвращаем поля как были; если была
+// удалена — создаём заново под тем же id (доли филиалов тоже восстанавливаются).
+// Не восстанавливаются: заметки и файлы служебок удалённой закупки (удаляются вместе с ней).
+// ---------------------------------------------------------------------------
+router.post('/restore-snapshot', requireRole('admin', 'financier', 'branch_editor'), async (req, res) => {
+  const list = Array.isArray(req.body?.purchases) ? req.body.purchases : [];
+  if (list.length === 0 || list.length > 5000) {
+    return res.status(400).json({ status: 'error', message: 'Нечего откатывать' });
+  }
+
+  const dateOrNull = (v) => (v ? String(v).slice(0, 10) : null);
+  const numOrNull = (v) => (v === null || v === undefined || v === '' ? null : Number(v));
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    let restored = 0;
+
+    for (const p of list) {
+      const id = Number(p?.id);
+      if (!Number.isInteger(id) || id <= 0 || !p.name || !p.year || !p.quarter) continue;
+
+      const shares = Array.isArray(p.shares)
+        ? p.shares
+            .map((s) => ({ branch_id: Number(s.branch_id), amount: Number(s.amount) }))
+            .filter((s) => s.branch_id && s.amount > 0)
+        : [];
+
+      await client.query(
+        `INSERT INTO purchases
+           (id, year, quarter, branch_id, name, product_group, method, justification,
+            tz_date, notice_date, amount, deadline, okpd2, comment, status, cancel_reason,
+            transfer_note, source, reviewed_at, sort_order, created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+         ON CONFLICT (id) DO UPDATE SET
+           year = EXCLUDED.year, quarter = EXCLUDED.quarter, branch_id = EXCLUDED.branch_id,
+           name = EXCLUDED.name, product_group = EXCLUDED.product_group, method = EXCLUDED.method,
+           justification = EXCLUDED.justification, tz_date = EXCLUDED.tz_date,
+           notice_date = EXCLUDED.notice_date, amount = EXCLUDED.amount, deadline = EXCLUDED.deadline,
+           okpd2 = EXCLUDED.okpd2, comment = EXCLUDED.comment, status = EXCLUDED.status,
+           cancel_reason = EXCLUDED.cancel_reason, transfer_note = EXCLUDED.transfer_note,
+           source = EXCLUDED.source, reviewed_at = EXCLUDED.reviewed_at,
+           sort_order = EXCLUDED.sort_order, updated_at = now()`,
+        [
+          id, Number(p.year), Number(p.quarter),
+          shares.length > 0 ? null : numOrNull(p.branch_id),
+          p.name, p.product_group || null, p.method || null, p.justification || null,
+          dateOrNull(p.tz_date), dateOrNull(p.notice_date),
+          shares.length > 0 ? shares.reduce((sum, s) => sum + s.amount, 0) : Number(p.amount) || 0,
+          p.deadline || null, p.okpd2 || null, p.comment || null,
+          p.status || 'plan', p.cancel_reason || null, p.transfer_note || null,
+          p.source || 'center', p.reviewed_at || null, numOrNull(p.sort_order), req.user.userId,
+        ]
+      );
+
+      if (shares.length > 0) {
+        await client.query('DELETE FROM purchase_branch_shares WHERE purchase_id = $1', [id]);
+        for (const s of shares) {
+          await client.query(
+            `INSERT INTO purchase_branch_shares (purchase_id, branch_id, amount) VALUES ($1,$2,$3)`,
+            [id, s.branch_id, s.amount]
+          );
+        }
+      }
+      restored += 1;
+    }
+
+    await client.query('COMMIT');
+    res.json({ status: 'ok', restored });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Не удалось откатить: ' + err.message });
+  } finally {
+    client.release();
+  }
+});
+
 // Массовое удаление. Два режима (admin/financier):
 //   { ids: [1, 2, 3] }                — выбранные закупки;
 //   { year: 2026, quarter: 2 }        — все закупки квартала за год.
@@ -790,6 +871,7 @@ router.post('/import', requireRole('admin', 'financier'), (req, res, next) => {
 
   const unmatchedBranches = new Set();
   const skipped = [];
+  const dateWarnings = [];
   let created = 0;
 
   const client = await pool.connect();
@@ -819,15 +901,30 @@ router.post('/import', requireRole('admin', 'financier'), (req, res, next) => {
 
       const amountTotal = resolvedShares.reduce((sum, s) => sum + s.amount, 0);
 
+      // Даты, которые не удалось распознать, не теряем молча: кладём исходный текст в «Примечание»
+      // и показываем в отчёте об импорте. Даты не того года — тоже предупреждаем (сами не меняем).
+      const dateNotes = [];
+      const checkDate = (label, iso, raw) => {
+        if (!iso && raw) {
+          dateNotes.push(`${label} в Excel: «${raw}» (не распознана)`);
+          dateWarnings.push(`«${g.name}»: ${label} «${raw}» не распознана — исходный текст записан в примечание`);
+        } else if (iso && Number(iso.slice(0, 4)) !== year) {
+          dateWarnings.push(`«${g.name}»: ${label} ${iso.split('-').reverse().join('.')} — год не совпадает с годом плана (${year}), проверьте`);
+        }
+      };
+      checkDate('Дата подачи ТЗ', g.tz_date, g.tz_raw);
+      checkDate('Дата размещения извещения', g.notice_date, g.notice_raw);
+      const importComment = dateNotes.length ? dateNotes.join('; ') : null;
+
       const purchaseResult = await client.query(
         `INSERT INTO purchases
           (year, quarter, branch_id, name, product_group, method, justification,
            tz_date, notice_date, amount, deadline, okpd2, comment, source, created_by)
-         VALUES ($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,NULL,'center',$12)
+         VALUES ($1,$2,NULL,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'center',$13)
          RETURNING id`,
         [
           year, g.quarter, g.name, g.product_group, g.method, g.justification,
-          g.tz_date, g.notice_date, amountTotal, g.deadline, g.okpd2, req.user.userId,
+          g.tz_date, g.notice_date, amountTotal, g.deadline, g.okpd2, importComment, req.user.userId,
         ]
       );
       const purchaseId = purchaseResult.rows[0].id;
@@ -855,6 +952,7 @@ router.post('/import', requireRole('admin', 'financier'), (req, res, next) => {
     status: 'ok',
     created,
     skipped,
+    dateWarnings,
     unmatchedBranches: [...unmatchedBranches],
   });
 });
@@ -890,6 +988,55 @@ async function fetchPurchaseWithShares(id) {
   return { ...rest, branch_name: branchName };
 }
 
+const MONTHS_RU = [
+  ['январ', 1], ['феврал', 2], ['март', 3], ['апрел', 4], ['ма', 5], ['июн', 6],
+  ['июл', 7], ['август', 8], ['сентябр', 9], ['октябр', 10], ['ноябр', 11], ['декабр', 12],
+];
+
+function buildIso(y, m, d) {
+  y = Number(y); m = Number(m); d = Number(d);
+  if (!(y >= 2000 && y <= 2100) || !(m >= 1 && m <= 12) || !(d >= 1 && d <= 31)) return null;
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  if (dt.getUTCMonth() !== m - 1) return null; // например 31.02
+  return `${y}-${String(m).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+}
+
+// Значение ячейки Excel → "ГГГГ-ММ-ДД" или null (см. комментарий у parseExcelDate).
+function parseDateCell(v, XLSX) {
+  if (v === null || v === undefined || v === '') return null;
+
+  if (v instanceof Date) {
+    return Number.isNaN(v.getTime()) ? null : buildIso(v.getUTCFullYear(), v.getUTCMonth() + 1, v.getUTCDate());
+  }
+  if (typeof v === 'number') {
+    // Настоящая дата Excel — число-serial. Мелкие числа (6, 7 — номера строк/мусор) не даты.
+    if (v < 36526 || v > 73050) return null;
+    const d = XLSX.SSF.parse_date_code(v);
+    return d && d.y ? buildIso(d.y, d.m, d.d) : null;
+  }
+
+  const s = String(v).replace(/ /g, ' ').toLowerCase().trim();
+  let m;
+
+  if ((m = s.match(/(\d{4})-(\d{2})-(\d{2})/))) return buildIso(m[1], m[2], m[3]);
+  // 15.01.2026 / 10.03.2026г / 05/03/2026 / "15 . 01 . 2026"
+  if ((m = s.match(/(\d{1,2})\s*[.\/]\s*(\d{1,2})\s*[.\/]\s*(\d{4})/))) return buildIso(m[3], m[2], m[1]);
+  // 15.01.26
+  if ((m = s.match(/(\d{1,2})\s*[.\/]\s*(\d{1,2})\s*[.\/]\s*(\d{2})(?!\d)/))) return buildIso(2000 + Number(m[3]), m[2], m[1]);
+  // 20.112026 — потеряна вторая точка
+  if ((m = s.match(/^(\d{1,2})[.\/](\d{2})(\d{4})(?!\d)/))) return buildIso(m[3], m[2], m[1]);
+  // 04-06.2026 / 09-10.2026 — диапазон месяцев → 1-е число первого месяца
+  if ((m = s.match(/(\d{1,2})\s*[-–—]\s*\d{1,2}\s*[.\/]\s*(\d{4})/))) return buildIso(m[2], m[1], 1);
+  // 02.2026 / 11.2026 г. — только месяц и год → 1-е число
+  if ((m = s.match(/(?<!\d)(\d{1,2})\s*[.\/]\s*(\d{4})/))) return buildIso(m[2], m[1], 1);
+  // "ноябрь 2026"
+  if ((m = s.match(/([а-яё]+)\.?\s*(\d{4})/))) {
+    const hit = MONTHS_RU.find(([stem]) => m[1].startsWith(stem));
+    if (hit) return buildIso(m[2], hit[1], 1);
+  }
+  return null;
+}
+
 // Разбор листа "План закупочных мероприятий" в список групп-закупок.
 // Каждая группа — одна закупка, возможно, с несколькими филиалами (shares).
 //
@@ -918,7 +1065,8 @@ function parsePlanSheet(buffer, quarterOverride) {
 
   const findCol = (patterns) => {
     for (let c = 0; c < headerRow.length; c++) {
-      const cellText = String(headerRow[c] || '').toLowerCase();
+      // пробелы/переносы строк внутри заголовка схлопываем: "подачи  ТЗ" иначе не находится
+      const cellText = String(headerRow[c] || '').toLowerCase().replace(/\s+/g, ' ');
       if (patterns.some((p) => cellText.includes(p))) return c;
     }
     return -1;
@@ -930,8 +1078,8 @@ function parsePlanSheet(buffer, quarterOverride) {
     productGroup: findCol(['группа продукции', 'асгор']),
     method: findCol(['способ размещения']),
     justification: findCol(['обоснование']),
-    tzDate: findCol(['подачи тз', 'подачи спецификации', 'родачи тз']),
-    noticeDate: findCol(['размещения извещения']),
+    tzDate: findCol(['подачи тз', 'подачи спецификации', 'родачи тз', 'дата подачи', 'дата родачи']),
+    noticeDate: findCol(['размещения извещения', 'дата размещения']),
     amount: findCol(['нмц']),
     branch: findCol(['потребител']),
     deadline: findCol(['срок исполнения']),
@@ -950,17 +1098,11 @@ function parsePlanSheet(buffer, quarterOverride) {
     return Number.isFinite(n) && n > 0 ? n : null;
   };
 
-  const excelDateToSQL = (v) => {
-    if (v === null || v === undefined || v === '') return null;
-    if (typeof v === 'number') {
-      const d = XLSX.SSF.parse_date_code(v);
-      if (d && d.y) return `${d.y}-${String(d.m).padStart(2, '0')}-${String(d.d).padStart(2, '0')}`;
-      return null;
-    }
-    const m = String(v).match(/(\d{1,2})[.\/](\d{1,2})[.\/](\d{4})/);
-    if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
-    return null;
-  };
+  // Дата из ячейки Excel → "ГГГГ-ММ-ДД" или null. Понимает всё, что реально встречается в планах:
+  //   настоящая дата Excel (число-serial);  "15.01.2026 г." / "10.03.2026г" / "05/03/2026";
+  //   "20.112026" (потеряна точка);  "02.2026 г" / "11.2026" (только месяц → 1-е число);
+  //   "04-06.2026" (диапазон месяцев → 1-е число первого месяца);  "ноябрь 2026".
+  const parseExcelDate = (v) => parseDateCell(v, XLSX);
 
   const deadlineText = (v) => {
     if (v === null || v === undefined || v === '') return null;
@@ -1006,6 +1148,9 @@ function parsePlanSheet(buffer, quarterOverride) {
 
     if (!nameVal && amountVal === null && !branchVal) continue; // пустая строка-разделитель
 
+    // Строка с нумерацией колонок («1 2 3 … 10» под заголовком) — не закупка
+    if (/^\d+$/.test(numText) && /^\d+$/.test(nameVal)) continue;
+
     const isNewItem = /^\d+$/.test(numText);
 
     if (isNewItem) {
@@ -1016,8 +1161,10 @@ function parsePlanSheet(buffer, quarterOverride) {
         product_group: col.productGroup !== -1 ? text(row[col.productGroup]) || null : null,
         method: col.method !== -1 ? text(row[col.method]) || null : null,
         justification: col.justification !== -1 ? text(row[col.justification]) || null : null,
-        tz_date: col.tzDate !== -1 ? excelDateToSQL(row[col.tzDate]) : null,
-        notice_date: col.noticeDate !== -1 ? excelDateToSQL(row[col.noticeDate]) : null,
+        tz_date: col.tzDate !== -1 ? parseExcelDate(row[col.tzDate]) : null,
+        notice_date: col.noticeDate !== -1 ? parseExcelDate(row[col.noticeDate]) : null,
+        tz_raw: col.tzDate !== -1 ? text(row[col.tzDate]) : '',
+        notice_raw: col.noticeDate !== -1 ? text(row[col.noticeDate]) : '',
         deadline: col.deadline !== -1 ? deadlineText(row[col.deadline]) : null,
         okpd2: col.okpd2 !== -1 ? text(row[col.okpd2]) || null : null,
         shares: [],
@@ -1028,6 +1175,15 @@ function parsePlanSheet(buffer, quarterOverride) {
     } else if (currentGroup && amountVal !== null && branchVal) {
       // Продолжение предыдущей закупки — ещё один филиал с своей суммой
       currentGroup.shares.push({ branchNameRaw: branchVal, amount: amountVal });
+      // Даты иногда проставлены не в первой строке закупки, а в следующих — подхватываем
+      if (!currentGroup.tz_date && col.tzDate !== -1) {
+        currentGroup.tz_date = parseExcelDate(row[col.tzDate]);
+        if (!currentGroup.tz_raw) currentGroup.tz_raw = text(row[col.tzDate]);
+      }
+      if (!currentGroup.notice_date && col.noticeDate !== -1) {
+        currentGroup.notice_date = parseExcelDate(row[col.noticeDate]);
+        if (!currentGroup.notice_raw) currentGroup.notice_raw = text(row[col.noticeDate]);
+      }
     }
   }
   flush();

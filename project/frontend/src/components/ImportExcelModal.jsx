@@ -72,6 +72,17 @@ export default function ImportExcelModal({ year, defaultQuarter, onClose, onImpo
               </div>
             )}
 
+            {result.dateWarnings?.length > 0 && (
+              <div style={styles.warn}>
+                Проверьте даты ({result.dateWarnings.length}):
+                <ul style={styles.skipList}>
+                  {result.dateWarnings.map((w, i) => (
+                    <li key={i}>{w}</li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
             {result.skipped?.length > 0 && (
               <div style={styles.warn}>
                 Пропущено позиций: {result.skipped.length}
