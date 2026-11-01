@@ -3,6 +3,7 @@ import { apiFetch } from "../api";
 import { useAuth } from "../context/AuthContext";
 import DocumentsModal, { fileIcon, fmtSize } from "./DocumentsModal";
 import ImportExcelModal from "./ImportExcelModal";
+import ApprovalBar from "./ApprovalBar";
 import ContextMenu from "./ContextMenu";
 import DateInput from "./DateInput";
 import { isoToRu } from "../utils/date";
@@ -21,6 +22,8 @@ const EMPTY_FORM = {
 // (квартал → годовой план) история отката не теряется. После перезагрузки страницы — очищается.
 // В записи: before — снимки закупок ДО действия (их возвращает POST /api/purchases/restore-snapshot),
 // created — id закупок, созданных действием (при откате удаляются).
+// Какая версия плана открыта по годам (null — рабочий план): не сбрасывается при переходе между страницами.
+const viewByYear = {};
 const UNDO_LIMIT = 30;
 const undoStack = [];
 const snap = (p) => JSON.parse(JSON.stringify(p));
@@ -127,9 +130,16 @@ function branchColorForRow(p, branches) {
 // search: строка для серверного поиска (используется на странице поиска)
 export default function PurchasesTable({ year = new Date().getFullYear(), quarter = null, search = "", pending = false, showQuarterColumn = false, title }) {
   const { user } = useAuth();
-  const canEdit = user?.role === "admin" || user?.role === "financier" || user?.role === "branch_editor";
-  const canReview = user?.role === "admin" || user?.role === "financier";
-  const canImport = user?.role === "admin" || user?.role === "financier";
+  // null — рабочий план (редактируется), число — id утверждённой версии (только чтение)
+  const [viewVersion, setViewVersionState] = useState(() => (!search && !pending ? viewByYear[year] ?? null : null));
+  const [approvalsKey, setApprovalsKey] = useState(0);
+  const readOnly = viewVersion !== null;
+  const setViewVersion = (v) => { viewByYear[year] = v; setViewVersionState(v); };
+  const isManager = user?.role === "admin" || user?.role === "financier";
+  const canEdit = !readOnly && (isManager || user?.role === "branch_editor");
+  const canReview = !readOnly && isManager;
+  const canImport = !readOnly && isManager;
+  const showApprovalBar = !search && !pending;
 
   const [items, setItems] = useState([]);
   const itemsRef = useRef([]);
@@ -276,7 +286,7 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
       if (effectiveSearch) params.set("search", effectiveSearch);
 
       const [purchasesRes, branchesRes, planRes] = await Promise.all([
-        apiFetch(`/api/purchases?${params.toString()}`),
+        apiFetch(viewVersion !== null ? `/api/approvals/${viewVersion}/purchases?${params.toString()}` : `/api/purchases?${params.toString()}`),
         apiFetch(`/api/branches`),
         apiFetch(`/api/plan?year=${year}`),
       ]);
@@ -287,9 +297,10 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
       setError(err.message);
     } finally {
       setLoading(false);
+      setApprovalsKey((k) => k + 1); // панель утверждения пересчитает «изменений после утверждения»
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [year, quarter, search, pending, localSearch]);
+  }, [year, quarter, search, pending, localSearch, viewVersion]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -775,6 +786,16 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
           )}
         </div>
       </div>
+
+      {showApprovalBar && (
+        <ApprovalBar
+          year={year}
+          canApprove={isManager}
+          viewVersion={viewVersion}
+          onChangeView={setViewVersion}
+          refreshKey={approvalsKey}
+        />
+      )}
 
       {error && <div style={styles.errorBox}>{error}</div>}
 

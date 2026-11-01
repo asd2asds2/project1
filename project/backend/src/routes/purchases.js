@@ -1,10 +1,12 @@
 const express = require('express');
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const multer = require('multer');
 const XLSX = require('xlsx');
 const pool = require('../db');
 const { requireAuth, requireRole } = require('../middleware/auth');
+const { ready: approvalsReady } = require('../initApprovals');
 
 const router = express.Router();
 
@@ -19,6 +21,7 @@ const memoryUpload = multer({
 });
 
 router.use(requireAuth);
+router.use((req, res, next) => { approvalsReady.then(() => next()).catch(() => res.status(500).json({ status: 'error', message: 'Не удалось подготовить таблицы' })); });
 
 // ---------------------------------------------------------------------------
 // Сводка для главной страницы
@@ -839,6 +842,10 @@ router.post('/import', requireRole('admin', 'financier'), (req, res, next) => {
 }, async (req, res) => {
   const year = Number(req.body.year);
   const quarterOverride = req.body.quarter ? Number(req.body.quarter) : null;
+  // preview=1 — только проверка: ничего не записываем, возвращаем отчёт о дублях.
+  const preview = req.body.preview === '1';
+  // duplicates=skip (по умолчанию) — дубли пропускаем; duplicates=add — осознанно добавить и дубли.
+  const addDuplicates = req.body.duplicates === 'add';
 
   if (!req.file) {
     return res.status(400).json({ status: 'error', message: 'Файл не передан' });
@@ -858,9 +865,22 @@ router.post('/import', requireRole('admin', 'financier'), (req, res, next) => {
     return res.status(400).json({ status: 'error', message: 'В файле не найдено ни одной строки с закупкой' });
   }
 
-  let branchRows;
+  const fileHash = crypto.createHash('sha256').update(req.file.buffer).digest('hex');
+  const fileName = req.file.originalname ? Buffer.from(req.file.originalname, 'latin1').toString('utf8') : null;
+
+  let branchRows, existingRows, prevImport;
   try {
     branchRows = (await pool.query('SELECT id, name FROM branches WHERE is_active = true')).rows;
+    existingRows = (await pool.query(
+      `SELECT id, quarter, name, amount, status FROM purchases WHERE year = $1`, [year]
+    )).rows;
+    prevImport = (await pool.query(
+      `SELECT i.imported_at, i.file_name, i.created_count, u.full_name
+         FROM plan_imports i LEFT JOIN users u ON u.id = i.imported_by
+        WHERE i.year = $1 AND i.file_hash = $2
+        ORDER BY i.id DESC LIMIT 1`,
+      [year, fileHash]
+    )).rows[0] || null;
   } catch (err) {
     console.error(err);
     return res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
@@ -869,53 +889,113 @@ router.post('/import', requireRole('admin', 'financier'), (req, res, next) => {
   const norm = (s) => String(s || '').trim().toLowerCase();
   const branchByName = new Map(branchRows.map((b) => [norm(b.name), b.id]));
 
+  // Ключ дубля: квартал + нормализованное название (регистр, пробелы, кавычки, ё/е не важны).
+  const nameKey = (s) =>
+    String(s || '').toLowerCase().replace(/ё/g, 'е').replace(/[«»"'`“”„]/g, '')
+      .replace(/\s+/g, ' ').replace(/[\s.;,]+$/g, '').trim();
+  const dupKey = (quarter, name) => `${quarter}|${nameKey(name)}`;
+
+  const existingByKey = new Map();
+  for (const r of existingRows) {
+    const k = dupKey(r.quarter, r.name);
+    if (!existingByKey.has(k)) existingByKey.set(k, r);
+  }
+
   const unmatchedBranches = new Set();
   const skipped = [];
   const dateWarnings = [];
-  let created = 0;
+  const duplicates = [];
+  const toInsert = [];
+  const seenInFile = new Set();
 
+  for (const g of groups) {
+    if (!g.quarter) {
+      skipped.push(`«${g.name}»: не удалось определить квартал (нет разделов "N квартал" в файле и не указан квартал по умолчанию)`);
+      continue;
+    }
+
+    const resolvedShares = [];
+    for (const s of g.shares) {
+      const branchId = branchByName.get(norm(s.branchNameRaw));
+      if (!branchId) {
+        unmatchedBranches.add(s.branchNameRaw);
+        continue;
+      }
+      resolvedShares.push({ branch_id: branchId, amount: s.amount });
+    }
+
+    if (resolvedShares.length === 0) {
+      skipped.push(`«${g.name}»: филиал(ы) не найдены в системе (${g.shares.map((s) => s.branchNameRaw).join(', ')})`);
+      continue;
+    }
+
+    const amountTotal = resolvedShares.reduce((sum, s) => sum + s.amount, 0);
+
+    // --- Проверка на дубль: такая закупка уже есть в плане этого года (в том же квартале)
+    // или повторяется в самом файле.
+    const key = dupKey(g.quarter, g.name);
+    const existing = existingByKey.get(key);
+    const repeatedInFile = seenInFile.has(key);
+    if (existing || repeatedInFile) {
+      const sameAmount = existing ? Math.abs(Number(existing.amount) - amountTotal) < 0.005 : null;
+      duplicates.push({
+        name: g.name,
+        quarter: g.quarter,
+        amount: amountTotal,
+        existing_id: existing ? existing.id : null,
+        existing_amount: existing ? Number(existing.amount) : null,
+        same_amount: sameAmount,
+        reason: existing ? 'already_in_plan' : 'repeated_in_file',
+      });
+      if (!addDuplicates) continue;
+    }
+    seenInFile.add(key);
+
+    const dateNotes = [];
+    const checkDate = (label, iso, raw) => {
+      if (!iso && raw) {
+        dateNotes.push(`${label} в Excel: «${raw}» (не распознана)`);
+        dateWarnings.push(`«${g.name}»: ${label} «${raw}» не распознана — исходный текст записан в примечание`);
+      } else if (iso && Number(iso.slice(0, 4)) !== year) {
+        dateWarnings.push(`«${g.name}»: ${label} ${iso.split('-').reverse().join('.')} — год не совпадает с годом плана (${year}), проверьте`);
+      }
+    };
+    checkDate('Дата подачи ТЗ', g.tz_date, g.tz_raw);
+    checkDate('Дата размещения извещения', g.notice_date, g.notice_raw);
+
+    toInsert.push({ g, resolvedShares, amountTotal, importComment: dateNotes.length ? dateNotes.join('; ') : null });
+  }
+
+  const baseReport = {
+    status: 'ok',
+    preview,
+    toCreate: toInsert.length,
+    duplicates,
+    skipped,
+    dateWarnings,
+    unmatchedBranches: [...unmatchedBranches],
+    fileAlreadyImported: prevImport
+      ? {
+          at: prevImport.imported_at,
+          by: prevImport.full_name,
+          file_name: prevImport.file_name,
+          created: prevImport.created_count,
+        }
+      : null,
+  };
+
+  if (preview) {
+    return res.json({ ...baseReport, created: 0 });
+  }
+
+  let created = 0;
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // Не даём двум одновременным импортам вставить одно и то же
+    await client.query('SELECT pg_advisory_xact_lock($1)', [910000 + year]);
 
-    for (const g of groups) {
-      if (!g.quarter) {
-        skipped.push(`«${g.name}»: не удалось определить квартал (нет разделов "N квартал" в файле и не указан квартал по умолчанию)`);
-        continue;
-      }
-
-      const resolvedShares = [];
-      for (const s of g.shares) {
-        const branchId = branchByName.get(norm(s.branchNameRaw));
-        if (!branchId) {
-          unmatchedBranches.add(s.branchNameRaw);
-          continue;
-        }
-        resolvedShares.push({ branch_id: branchId, amount: s.amount });
-      }
-
-      if (resolvedShares.length === 0) {
-        skipped.push(`«${g.name}»: филиал(ы) не найдены в системе (${g.shares.map((s) => s.branchNameRaw).join(', ')})`);
-        continue;
-      }
-
-      const amountTotal = resolvedShares.reduce((sum, s) => sum + s.amount, 0);
-
-      // Даты, которые не удалось распознать, не теряем молча: кладём исходный текст в «Примечание»
-      // и показываем в отчёте об импорте. Даты не того года — тоже предупреждаем (сами не меняем).
-      const dateNotes = [];
-      const checkDate = (label, iso, raw) => {
-        if (!iso && raw) {
-          dateNotes.push(`${label} в Excel: «${raw}» (не распознана)`);
-          dateWarnings.push(`«${g.name}»: ${label} «${raw}» не распознана — исходный текст записан в примечание`);
-        } else if (iso && Number(iso.slice(0, 4)) !== year) {
-          dateWarnings.push(`«${g.name}»: ${label} ${iso.split('-').reverse().join('.')} — год не совпадает с годом плана (${year}), проверьте`);
-        }
-      };
-      checkDate('Дата подачи ТЗ', g.tz_date, g.tz_raw);
-      checkDate('Дата размещения извещения', g.notice_date, g.notice_raw);
-      const importComment = dateNotes.length ? dateNotes.join('; ') : null;
-
+    for (const { g, resolvedShares, amountTotal, importComment } of toInsert) {
       const purchaseResult = await client.query(
         `INSERT INTO purchases
           (year, quarter, branch_id, name, product_group, method, justification,
@@ -935,9 +1015,14 @@ router.post('/import', requireRole('admin', 'financier'), (req, res, next) => {
           [purchaseId, s.branch_id, s.amount]
         );
       }
-
       created += 1;
     }
+
+    await client.query(
+      `INSERT INTO plan_imports (year, file_hash, file_name, created_count, skipped_duplicates, imported_by)
+       VALUES ($1,$2,$3,$4,$5,$6)`,
+      [year, fileHash, fileName, created, addDuplicates ? 0 : duplicates.length, req.user.userId]
+    );
 
     await client.query('COMMIT');
   } catch (err) {
@@ -948,13 +1033,7 @@ router.post('/import', requireRole('admin', 'financier'), (req, res, next) => {
     client.release();
   }
 
-  res.json({
-    status: 'ok',
-    created,
-    skipped,
-    dateWarnings,
-    unmatchedBranches: [...unmatchedBranches],
-  });
+  res.json({ ...baseReport, created });
 });
 
 // ---------------------------------------------------------------------------

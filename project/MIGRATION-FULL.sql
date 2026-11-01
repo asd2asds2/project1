@@ -49,3 +49,39 @@ CREATE INDEX IF NOT EXISTS idx_purchase_shares_branch ON purchase_branch_shares(
 -- \d documents           -- таблица файлов
 -- \d purchases           -- branch_id должен быть nullable
 -- \dt                    -- purchase_branch_shares должна быть в списке
+
+-- ---------------------------------------------------------------------------
+-- 3. Утверждение плана + журнал импортов (проверка дублей)
+-- Эти таблицы backend создаёт сам при запуске (initApprovals.js), вручную
+-- выполнять НЕ обязательно. Блок оставлен для справки / ручного применения.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS plan_approvals (
+    id SERIAL PRIMARY KEY,
+    year INT NOT NULL,
+    version INT NOT NULL,
+    note TEXT,
+    items_count INT NOT NULL DEFAULT 0,
+    total_amount NUMERIC(15,2) NOT NULL DEFAULT 0,
+    approved_by INT REFERENCES users(id),
+    approved_at TIMESTAMP NOT NULL DEFAULT NOW(),
+    UNIQUE (year, version)
+);
+CREATE TABLE IF NOT EXISTS plan_approval_items (
+    id SERIAL PRIMARY KEY,
+    approval_id INT NOT NULL REFERENCES plan_approvals(id) ON DELETE CASCADE,
+    purchase_id INT NOT NULL,
+    ord INT NOT NULL DEFAULT 0,
+    data JSONB NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_approval_items_approval ON plan_approval_items(approval_id);
+CREATE TABLE IF NOT EXISTS plan_imports (
+    id SERIAL PRIMARY KEY,
+    year INT NOT NULL,
+    file_hash TEXT NOT NULL,
+    file_name TEXT,
+    created_count INT NOT NULL DEFAULT 0,
+    skipped_duplicates INT NOT NULL DEFAULT 0,
+    imported_by INT REFERENCES users(id),
+    imported_at TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_plan_imports_hash ON plan_imports(year, file_hash);
