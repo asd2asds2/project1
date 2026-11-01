@@ -203,6 +203,13 @@ export default function Layout() {
             <>
               <span style={styles.menuDivider} />
               <NavLink
+                to="/execution"
+                style={({ isActive }) => ({ ...styles.menuLink, ...(isActive ? styles.menuLinkActive : {}) })}
+              >
+                <span style={styles.menuIcon}>✔</span>
+                <span>Исполнение</span>
+              </NavLink>
+              <NavLink
                 to="/report"
                 style={({ isActive }) => ({ ...styles.menuLink, ...(isActive ? styles.menuLinkActive : {}) })}
               >

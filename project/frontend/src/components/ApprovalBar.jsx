@@ -6,7 +6,7 @@ const fmtDate = (d) => new Date(d).toLocaleDateString("ru-RU");
 
 // Панель «Рабочий план / Утверждённый план» + кнопка «Утвердить план».
 // viewVersion: null — рабочий (редактируемый) план, число — id утверждённой версии (только чтение).
-export default function ApprovalBar({ year, canApprove, viewVersion, onChangeView, refreshKey }) {
+export default function ApprovalBar({ year, canApprove, viewVersion, onChangeView, refreshKey, execText }) {
   const [info, setInfo] = useState(null);
   const [confirming, setConfirming] = useState(false);
   const [note, setNote] = useState("");
@@ -47,7 +47,8 @@ export default function ApprovalBar({ year, canApprove, viewVersion, onChangeVie
 
   const approvals = info.approvals;
   const last = approvals[0];
-  const viewing = approvals.find((a) => a.id === viewVersion) || null;
+  const viewing = typeof viewVersion === "number" ? approvals.find((a) => a.id === viewVersion) || null : null;
+  const isExec = viewVersion === "exec";
 
   return (
     <>
@@ -60,18 +61,25 @@ export default function ApprovalBar({ year, canApprove, viewVersion, onChangeVie
           >
             ✏️ Рабочий план
           </button>
+          <button
+            type="button"
+            onClick={() => onChangeView("exec")}
+            style={{ ...styles.tab, ...(isExec ? styles.tabActive : {}) }}
+          >
+            ✔ Исполнение
+          </button>
           {last && (
             <button
               type="button"
               onClick={() => onChangeView(viewing ? viewing.id : last.id)}
-              style={{ ...styles.tab, ...(viewVersion !== null ? styles.tabActive : {}) }}
+              style={{ ...styles.tab, ...(typeof viewVersion === "number" ? styles.tabActive : {}) }}
             >
               🔒 Утверждённый план
             </button>
           )}
         </div>
 
-        {viewVersion !== null && approvals.length > 1 && (
+        {typeof viewVersion === "number" && approvals.length > 1 && (
           <select value={viewVersion} onChange={(e) => onChangeView(Number(e.target.value))} style={styles.select}>
             {approvals.map((a) => (
               <option key={a.id} value={a.id}>
@@ -82,7 +90,12 @@ export default function ApprovalBar({ year, canApprove, viewVersion, onChangeVie
         )}
 
         <div style={styles.status}>
-          {viewing ? (
+          {isExec ? (
+            <>
+              <strong>Режим исполнения:</strong> отметьте исполненные закупки (✔) и укажите сумму договора — экономия посчитается сама.
+              Состав плана здесь не меняется. {execText}
+            </>
+          ) : viewing ? (
             <>
               Версия <strong>v{viewing.version}</strong> от {fmtDate(viewing.approved_at)}
               {viewing.approved_by_name ? `, утвердил(а): ${viewing.approved_by_name}` : ""} ·{" "}

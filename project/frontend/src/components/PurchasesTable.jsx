@@ -143,12 +143,15 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
   // null — рабочий план (редактируется), число — id утверждённой версии (только чтение)
   const [viewVersion, setViewVersionState] = useState(() => (!search && !pending ? viewByYear[year] ?? null : null));
   const [approvalsKey, setApprovalsKey] = useState(0);
+  const execMode = viewVersion === "exec";        // режим «Исполнение»: состав плана не меняем, вносим факт
+  const snapshotMode = typeof viewVersion === "number"; // утверждённая версия (только просмотр)
   const readOnly = viewVersion !== null;
   const setViewVersion = (v) => { viewByYear[year] = v; setViewVersionState(v); };
   const isManager = user?.role === "admin" || user?.role === "financier";
   const canEdit = !readOnly && (isManager || user?.role === "branch_editor");
   const canReview = !readOnly && isManager;
   const canImport = !readOnly && isManager;
+  const canExecute = execMode && isManager; // факт исполнения / сумма договора / признак «внеплан»
   const showApprovalBar = !search && !pending;
 
   const [items, setItems] = useState([]);
@@ -297,7 +300,7 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
       if (effectiveSearch) params.set("search", effectiveSearch);
 
       const [purchasesRes, branchesRes, planRes] = await Promise.all([
-        apiFetch(viewVersion !== null ? `/api/approvals/${viewVersion}/purchases?${params.toString()}` : `/api/purchases?${params.toString()}`),
+        apiFetch(snapshotMode ? `/api/approvals/${viewVersion}/purchases?${params.toString()}` : `/api/purchases?${params.toString()}`),
         apiFetch(`/api/branches`),
         apiFetch(`/api/plan?year=${year}`),
       ]);
@@ -750,7 +753,7 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
       items.push({ label: "Перенести в другой квартал", icon: "↷", onClick: () => transfer(p.id) });
       items.push({ label: "Отменить закупку", icon: "⊘", danger: true, onClick: () => cancelItem(p.id) });
     }
-    if (canReview && p.status !== "cancelled") {
+    if (canExecute && p.status !== "cancelled") {
       items.push({ divider: true });
       items.push({ label: isExecuted(p) ? "Изменить исполнение" : "Отметить исполненной", icon: "✔", onClick: () => setExecuting(p) });
       if (isExecuted(p)) items.push({ label: "Снять исполнение", icon: "↩", onClick: () => unexecute(p) });
@@ -830,6 +833,10 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
           viewVersion={viewVersion}
           onChangeView={setViewVersion}
           refreshKey={approvalsKey}
+          execText={(() => {
+            const live = items.filter((i) => i.status !== "cancelled");
+            return `Исполнено ${live.filter(isExecuted).length} из ${live.length} закупок на этой странице`;
+          })()}
         />
       )}
 
@@ -1016,9 +1023,14 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
                           ✓
                         </button>
                       )}
-                      {canReview && p.status !== "cancelled" && (
+                      {canExecute && p.status !== "cancelled" && (
                         <button type="button" onClick={() => setExecuting(p)} style={{ ...styles.iconButton, color: isExecuted(p) ? "var(--success, #1a8a4e)" : undefined }} className="icon-btn" title={isExecuted(p) ? "Изменить исполнение" : "Отметить исполненной"}>
                           ✔
+                        </button>
+                      )}
+                      {canExecute && p.status !== "cancelled" && (
+                        <button type="button" onClick={() => toggleUnplanned(p)} style={{ ...styles.iconButton, color: isUnplanned(p) ? "var(--danger)" : undefined }} className="icon-btn" title={isUnplanned(p) ? "Снять признак «внеплан»" : "Отметить как внеплан"}>
+                          ⚑
                         </button>
                       )}
                       {canReview && p.status === "plan" && (
