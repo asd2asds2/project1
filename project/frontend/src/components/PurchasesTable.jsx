@@ -4,6 +4,7 @@ import { useAuth } from "../context/AuthContext";
 import DocumentsModal, { fileIcon, fmtSize } from "./DocumentsModal";
 import ImportExcelModal from "./ImportExcelModal";
 import ApprovalBar from "./ApprovalBar";
+import ExecuteModal from "./ExecuteModal";
 import ContextMenu from "./ContextMenu";
 import DateInput from "./DateInput";
 import { isoToRu } from "../utils/date";
@@ -53,6 +54,15 @@ function addWorkdays(iso, n) {
   return d.toISOString().slice(0, 10);
 }
 
+// Внеплан — либо старый статус, либо новый признак (его ставит финансист вручную)
+function isUnplanned(p) {
+  return p.status === "unplanned" || p.is_unplanned === true;
+}
+
+function isExecuted(p) {
+  return p.contract_amount !== null && p.contract_amount !== undefined;
+}
+
 function fmtMoney(n) {
   return Number(n || 0).toLocaleString("ru-RU", { minimumFractionDigits: 0 });
 }
@@ -87,7 +97,7 @@ function rowStyle(p, quarterColor, branchColor) {
   if (p.status === "cancelled") {
     return { background: "var(--surface)", color: "var(--cancelled-text)", textDecoration: "line-through" };
   }
-  if (p.status === "unplanned") {
+  if (isUnplanned(p)) {
     // Внеплан: красная диагональная штриховка поверх заливки строки + толстая
     // красная полоса слева. Цвет филиала остаётся как подложка (его видно
     // сквозь штриховку и в точке в колонке «Филиал»), поэтому внеплан
@@ -161,6 +171,7 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
   const [form, setForm] = useState(EMPTY_FORM);
   const [filesFor, setFilesFor] = useState(null); // закупка, для которой открыта модалка файлов
   const [importing, setImporting] = useState(false);
+  const [executing, setExecuting] = useState(null); // закупка, для которой открыто окно «Исполнено»
   const [menu, setMenu] = useState(null); // { x, y, purchase } — контекстное меню по ПКМ
   const [dragId, setDragId] = useState(null);
   const [overId, setOverId] = useState(null);
@@ -360,7 +371,7 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
       total: active.reduce((sum, i) => sum + Number(i.amount || 0), 0),
       count: active.length,
       cancelled: items.filter((i) => i.status === "cancelled").length,
-      unplanned: items.filter((i) => i.status === "unplanned").length,
+      unplanned: items.filter((i) => isUnplanned(i)).length,
       pendingReview: items.filter((i) => i.source === "branch" && !i.reviewed_at).length,
     };
   }, [items]);
@@ -496,6 +507,25 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
       const before = findItem(id);
       await apiFetch(`/api/purchases/${id}/transfer`, { method: "POST", body: JSON.stringify({ to_quarter: Number(to) }) });
       if (before) pushUndo("Перенос в другой квартал", { before: [before] });
+      load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function unexecute(p) {
+    if (!window.confirm(`Снять отметку об исполнении закупки «${p.name}»?`)) return;
+    try {
+      await apiFetch(`/api/purchases/${p.id}/unexecute`, { method: "POST" });
+      load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
+  async function toggleUnplanned(p) {
+    try {
+      await apiFetch(`/api/purchases/${p.id}/unplanned`, { method: "POST", body: JSON.stringify({ value: !isUnplanned(p) }) });
       load();
     } catch (err) {
       setError(err.message);
@@ -719,6 +749,12 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
       items.push({ divider: true });
       items.push({ label: "Перенести в другой квартал", icon: "↷", onClick: () => transfer(p.id) });
       items.push({ label: "Отменить закупку", icon: "⊘", danger: true, onClick: () => cancelItem(p.id) });
+    }
+    if (canReview && p.status !== "cancelled") {
+      items.push({ divider: true });
+      items.push({ label: isExecuted(p) ? "Изменить исполнение" : "Отметить исполненной", icon: "✔", onClick: () => setExecuting(p) });
+      if (isExecuted(p)) items.push({ label: "Снять исполнение", icon: "↩", onClick: () => unexecute(p) });
+      items.push({ label: isUnplanned(p) ? "Снять признак «внеплан»" : "Отметить как внеплан", icon: "⚑", onClick: () => toggleUnplanned(p) });
     }
     if (canReview && p.status === "cancelled") {
       items.push({ divider: true });
@@ -952,10 +988,19 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
                   {wideColumns && <td style={{ ...styles.td, ...styles.tdNowrap }}>{p.deadline || "—"}</td>}
                   <td style={{ ...styles.td, ...styles.tdNowrap }}>{p.okpd2 || "—"}</td>
                   <td style={{ ...styles.td, ...styles.tdNowrap }}>
-                    {p.status === "unplanned" ? (
+                    {isUnplanned(p) ? (
                       <span style={styles.unplannedBadge}>ВНЕПЛАН</span>
                     ) : (
                       statusLabel(p.status)
+                    )}
+                    {isExecuted(p) && p.status !== "cancelled" && (
+                      <div style={styles.execInfo} title={`Сумма договора: ${fmtMoney(p.contract_amount)} ₽`}>
+                        ✔ исполнено · {fmtMoney(p.contract_amount)} ₽
+                        <span style={{ color: Number(p.amount) - Number(p.contract_amount) >= 0 ? "var(--success, #1a8a4e)" : "var(--danger)" }}>
+                          {" "}({Number(p.amount) - Number(p.contract_amount) >= 0 ? "экономия " : "перерасход "}
+                          {fmtMoney(Math.abs(Number(p.amount) - Number(p.contract_amount)))})
+                        </span>
+                      </div>
                     )}
                   </td>
                   <td style={{ ...styles.td, whiteSpace: "nowrap" }}>
@@ -969,6 +1014,11 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
                       {canReview && p.source === "branch" && !p.reviewed_at && (
                         <button type="button" onClick={() => review(p.id)} style={styles.iconButton} className="icon-btn" title="Отметить просмотренным">
                           ✓
+                        </button>
+                      )}
+                      {canReview && p.status !== "cancelled" && (
+                        <button type="button" onClick={() => setExecuting(p)} style={{ ...styles.iconButton, color: isExecuted(p) ? "var(--success, #1a8a4e)" : undefined }} className="icon-btn" title={isExecuted(p) ? "Изменить исполнение" : "Отметить исполненной"}>
+                          ✔
                         </button>
                       )}
                       {canReview && p.status === "plan" && (
@@ -1121,6 +1171,14 @@ export default function PurchasesTable({ year = new Date().getFullYear(), quarte
           title={filesFor.name}
           onClose={() => setFilesFor(null)}
           onChanged={load}
+        />
+      )}
+
+      {executing && (
+        <ExecuteModal
+          purchase={executing}
+          onClose={() => setExecuting(null)}
+          onSaved={load}
         />
       )}
 
@@ -1416,6 +1474,7 @@ const styles = {
   dragHandle: { cursor: "grab", color: "var(--text-muted)", fontSize: 14, userSelect: "none", display: "inline-block", lineHeight: 1 },
   sharesBreakdown: { fontSize: 10.5, color: "var(--text-secondary)", marginTop: 2, display: "flex", flexDirection: "column", gap: 2 },
   branchTag: { display: "inline-flex", alignItems: "center", gap: 5 },
+  execInfo: { fontSize: 11.5, marginTop: 3, color: "var(--text-secondary)", whiteSpace: "normal", minWidth: 150 },
   unplannedBadge: { background: "var(--unplanned-border)", color: "#fff", fontWeight: 700, fontSize: 11, letterSpacing: 0.4, borderRadius: 4, padding: "2px 7px", whiteSpace: "nowrap" },
   notesBadge: { marginLeft: 8, fontSize: 11, color: "var(--text-secondary)", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 10, padding: "1px 7px", whiteSpace: "nowrap" },
   quarterBadge: { fontSize: 12, fontWeight: 700, borderRadius: 10, padding: "2px 9px", whiteSpace: "nowrap" },

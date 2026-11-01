@@ -9,6 +9,7 @@ import HomePage from "./pages/HomePage";
 import BranchesPage from "./pages/BranchesPage";
 import AnnualPlanPage from "./pages/AnnualPlanPage";
 import QuarterPage from "./pages/QuarterPage";
+import ReportPage from "./pages/ReportPage";
 import SearchPage from "./pages/SearchPage";
 
 function App() {
@@ -33,6 +34,7 @@ function App() {
               <Route path="plan/annual" element={<AnnualPlanPage />} />
               <Route path="plan/q/:quarter" element={<QuarterPage />} />
               <Route path="search" element={<SearchPage />} />
+              <Route path="report" element={<ReportPage />} />
             </Route>
           </Routes>
         </AuthProvider>

@@ -85,3 +85,14 @@ CREATE TABLE IF NOT EXISTS plan_imports (
     imported_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_plan_imports_hash ON plan_imports(year, file_hash);
+
+-- ---------------------------------------------------------------------------
+-- 4. Исполнение закупок (отчёт). Backend добавляет эти колонки сам при старте
+-- (initApprovals.js) — вручную выполнять не обязательно.
+-- ---------------------------------------------------------------------------
+ALTER TABLE purchases
+  ADD COLUMN IF NOT EXISTS contract_amount NUMERIC(15,2) CHECK (contract_amount IS NULL OR contract_amount >= 0),
+  ADD COLUMN IF NOT EXISTS executed_at DATE,
+  ADD COLUMN IF NOT EXISTS contract_no TEXT,
+  ADD COLUMN IF NOT EXISTS supplier TEXT,
+  ADD COLUMN IF NOT EXISTS is_unplanned BOOLEAN NOT NULL DEFAULT FALSE;

@@ -10,6 +10,7 @@ const documentsRouter = require('./routes/documents');
 const planRouter = require('./routes/plan');
 const yearsRouter = require('./routes/years');
 const approvalsRouter = require('./routes/approvals');
+const reportsRouter = require('./routes/reports');
 const healthRouter = require('./routes/health');
 
 const app = express();
@@ -32,6 +33,7 @@ app.use('/api/documents', documentsRouter);
 app.use('/api/plan', planRouter);
 app.use('/api/years', yearsRouter);
 app.use('/api/approvals', approvalsRouter);
+app.use('/api/reports', reportsRouter);
 
 // Глобальная обработка ошибок
 app.use((err, req, res, next) => {

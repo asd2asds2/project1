@@ -199,6 +199,18 @@ export default function Layout() {
               </Fragment>
             );
           })}
+          {items.length > 0 && (
+            <>
+              <span style={styles.menuDivider} />
+              <NavLink
+                to="/report"
+                style={({ isActive }) => ({ ...styles.menuLink, ...(isActive ? styles.menuLinkActive : {}) })}
+              >
+                <span style={styles.menuIcon}>📈</span>
+                <span>Отчёт об исполнении</span>
+              </NavLink>
+            </>
+          )}
         </div>
 
         {branches.length > 0 && (

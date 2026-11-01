@@ -824,6 +824,85 @@ router.delete('/:id', requireRole('admin', 'financier'), async (req, res) => {
 });
 
 // ---------------------------------------------------------------------------
+// Исполнение закупки: фактическая сумма договора. Экономия считается как
+// НМЦ − сумма договора (отрицательная — перерасход). Только admin/financier.
+// Тело: { contract_amount, executed_at, contract_no, supplier }
+// ---------------------------------------------------------------------------
+router.post('/:id/execute', requireRole('admin', 'financier'), async (req, res) => {
+  const id = Number(req.params.id);
+  const contractAmount = Number(String(req.body.contract_amount ?? '').replace(',', '.'));
+  const executedAt = req.body.executed_at || null;
+  if (!id) return res.status(400).json({ status: 'error', message: 'Некорректная закупка' });
+  if (!Number.isFinite(contractAmount) || contractAmount < 0 || req.body.contract_amount === '' || req.body.contract_amount == null) {
+    return res.status(400).json({ status: 'error', message: 'Укажите сумму договора (0 или больше)' });
+  }
+  if (!executedAt || !/^\d{4}-\d{2}-\d{2}$/.test(executedAt)) {
+    return res.status(400).json({ status: 'error', message: 'Укажите дату исполнения' });
+  }
+  try {
+    const cur = await pool.query('SELECT status, contract_amount FROM purchases WHERE id = $1', [id]);
+    if (!cur.rows[0]) return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
+    if (cur.rows[0].status === 'cancelled') {
+      return res.status(400).json({ status: 'error', message: 'Отменённую закупку нельзя отметить исполненной' });
+    }
+    await pool.query(
+      `UPDATE purchases SET contract_amount = $1, executed_at = $2, contract_no = $3, supplier = $4,
+              updated_by = $5, updated_at = now() WHERE id = $6`,
+      [contractAmount, executedAt, String(req.body.contract_no || '').trim() || null,
+       String(req.body.supplier || '').trim() || null, req.user.userId, id]
+    );
+    await pool.query(
+      `INSERT INTO audit_log (entity_type, entity_id, action, field_name, old_value, new_value, changed_by)
+       VALUES ('purchase', $1, 'execute', 'contract_amount', $2, $3, $4)`,
+      [id, cur.rows[0].contract_amount, String(contractAmount), req.user.userId]
+    );
+    res.json({ status: 'ok', purchase: await fetchPurchaseWithShares(id) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+router.post('/:id/unexecute', requireRole('admin', 'financier'), async (req, res) => {
+  const id = Number(req.params.id);
+  try {
+    const cur = await pool.query('SELECT contract_amount FROM purchases WHERE id = $1', [id]);
+    if (!cur.rows[0]) return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
+    await pool.query(
+      `UPDATE purchases SET contract_amount = NULL, executed_at = NULL, contract_no = NULL, supplier = NULL,
+              updated_by = $1, updated_at = now() WHERE id = $2`,
+      [req.user.userId, id]
+    );
+    await pool.query(
+      `INSERT INTO audit_log (entity_type, entity_id, action, field_name, old_value, changed_by)
+       VALUES ('purchase', $1, 'unexecute', 'contract_amount', $2, $3)`,
+      [id, cur.rows[0].contract_amount, req.user.userId]
+    );
+    res.json({ status: 'ok', purchase: await fetchPurchaseWithShares(id) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+// Отметить/снять признак «внеплановая закупка». Тело: { value: true|false }
+router.post('/:id/unplanned', requireRole('admin', 'financier'), async (req, res) => {
+  const id = Number(req.params.id);
+  const value = req.body.value === true || req.body.value === 'true';
+  try {
+    const r = await pool.query(
+      `UPDATE purchases SET is_unplanned = $1, updated_by = $2, updated_at = now() WHERE id = $3 RETURNING id`,
+      [value, req.user.userId, id]
+    );
+    if (!r.rows[0]) return res.status(404).json({ status: 'error', message: 'Закупка не найдена' });
+    res.json({ status: 'ok', purchase: await fetchPurchaseWithShares(id) });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ status: 'error', message: 'Ошибка сервера' });
+  }
+});
+
+// ---------------------------------------------------------------------------
 // Импорт плана из Excel (файлы от филиалов/центра — формат "План закупочных
 // мероприятий"). multipart/form-data: file, year, quarter (необязательно —
 // нужен только если в файле нет разделов "1 квартал"/"2 квартал"/...).
